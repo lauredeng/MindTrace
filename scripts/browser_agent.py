@@ -1,0 +1,63 @@
+"""Real Chrome acceptance with explicitly offline decisions and actual SymPy execution."""
+from pathlib import Path
+import json
+from playwright.sync_api import sync_playwright
+ROOT=Path(__file__).resolve().parents[1];OUT=ROOT/'artifacts/agent-browser';OUT.mkdir(exist_ok=True)
+checks=[]
+with sync_playwright() as p:
+ b=p.chromium.launch(executable_path=r'C:\Program Files\Google\Chrome\Application\chrome.exe',headless=True)
+ page=b.new_page(viewport={'width':1550,'height':1350})
+ def idle():
+  page.wait_for_timeout(450)
+  page.wait_for_function("document.querySelector('[data-testid=stApp]')?.getAttribute('data-test-script-state') !== 'running'",timeout=60000)
+  assert page.locator('[data-testid=stException]').count()==0
+ def click(label):page.get_by_role('button',name=label,exact=True).click();idle()
+ def reply(text,direct=False):
+  page.get_by_role('textbox',name='回答或补充你的问题',exact=True).fill(text)
+  if direct:page.get_by_text('本次直接讲解，不继续追问',exact=True).click()
+  click('发送并继续辅导')
+ def mode(value):
+  field=page.get_by_role('combobox',name='离线验收场景',exact=True);field.fill(value);field.press('ArrowDown');page.get_by_role('option',name=value,exact=True).click();idle()
+ def shot(name,focus=None):
+  if focus:page.get_by_text(focus,exact=True).first.evaluate('e=>e.scrollIntoView({block:"center"})')
+  page.wait_for_timeout(250);page.screenshot(path=str(OUT/(name+'.png')),full_page=True)
+ page.goto('http://127.0.0.1:8513');page.get_by_role('button',name='进入学生学习中心',exact=True).wait_for(timeout=60000)
+ click('进入学生学习中心');page.get_by_text('深度辅导',exact=True).first.click();idle();click('开始深度辅导')
+ assert '等待你的回答' in page.inner_text('body');shot('01-purposeful-question','等待你的回答')
+ reply('我认为只有x需要乘2')
+ assert '局部工具显示第二步不等价' in page.inner_text('body')
+ page.get_by_text('本次辅导依据',exact=True).click();idle()
+ assert '第 2 步：相邻变形不成立' in page.inner_text('body')
+ shot('02-tool-and-explanation','本次辅导依据')
+ checks.append('Begin chooses a discriminating question; new student evidence causes actual local verification and an explanation based on its result')
+ reply('我想用一道新题验证')
+ assert '等待是否练习' in page.inner_text('body')
+ click('愿意，生成一道验证题')
+ page.get_by_role('textbox',name='验证题答案',exact=True).fill('x=1')
+ page.get_by_role('textbox',name='验证题过程 · 每行一步',exact=True).fill('-2*x+8=6\n-2*x=-2\nx=1')
+ click('提交验证题');page.get_by_text('已通过当前迁移验证',exact=True).wait_for(timeout=60000)
+ shot('03-voluntary-verification','自愿的新题验证')
+ click('结合验证结果继续辅导');assert '本次辅导结束' in page.inner_text('body')
+ checks.append('Practice requires explicit consent, publishes a locally checked reference, records submitted steps and lets the model use the resulting practice evidence')
+ reply('请直接解释这一步',direct=True)
+ assert '直接讲解：括号中的两项都要乘2' in page.inner_text('body')
+ checks.append('Explicit direct preference produces explanation without a new question')
+ mode('工具后限流');reply('我仍不确定原步骤是否等价')
+ assert '请求受限，已暂停' in page.inner_text('body')
+ mode('正常决策');click('继续暂停的辅导')
+ assert '本次讲解已给出' in page.inner_text('body')
+ checks.append('A limit after successful verification pauses safely; explicit resume reuses the stored observation')
+ reply('请老师核对原始步骤')
+ assert '需要教师复核' in page.inner_text('body')
+ click('教师')
+ page.get_by_text('学生学习反馈',exact=True).click();idle()
+ assert '本题已请求教师核对' in page.inner_text('body');shot('04-teacher-review-request','学生学习反馈')
+ click('学生');page.get_by_text('直接答疑',exact=True).first.click();idle()
+ assert page.get_by_role('button',name='获取所选讲解',exact=True).is_visible()
+ checks.append('Teacher sees the review request and trace; student can return to the original direct tutoring interface')
+ page.set_viewport_size({'width':390,'height':950});page.wait_for_timeout(300)
+ assert not page.evaluate('document.documentElement.scrollWidth>innerWidth')
+ checks.append('390px student view has no document overflow')
+ b.close()
+(OUT/'report.json').write_text(json.dumps({'decisions':'explicit offline fixture','mathematics_tool':'actual SymPy','checks':checks},ensure_ascii=False,indent=2),encoding='utf-8')
+print('PASS: question, model-selected actual verification, explanation, voluntary practice, direct preference, pause/resume, teacher handoff and mobile width')

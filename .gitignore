@@ -1,0 +1,19 @@
+.env
+__pycache__/
+.pytest_cache/
+*.pyc
+.local_data/
+
+.venv/
+artifacts/
+*.log
+
+.env.*
+!.env.example
+.streamlit/secrets.toml
+*.pem
+*.key
+exports/
+
+# Server classroom records and scoped access-code hashes
+classrooms/

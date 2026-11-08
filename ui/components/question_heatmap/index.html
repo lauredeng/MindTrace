@@ -1,0 +1,61 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><style>
+*{box-sizing:border-box}#root{display:flow-root;padding:4px}body{margin:0;background:#fff;color:#23304a;font-family:Inter,"Segoe UI","Microsoft YaHei",sans-serif;font-size:13px}
+.section{margin:0 0 18px}.section h3{margin:0 0 10px;font-size:13px;font-weight:650;color:#53617c}
+.parent{grid-column:1/-1;width:100%;font-size:11px;color:#78849a;margin:3px 0 2px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,66px);gap:10px;align-items:flex-start}
+.cell{width:66px;height:66px;border:1px solid transparent;border-radius:13px;cursor:pointer;padding:8px 4px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5px;font:inherit;transition:transform .12s,box-shadow .12s;position:relative}
+.cell:hover{box-shadow:0 5px 12px #28344820}.cell:focus-visible{outline:3px solid #2563eb;outline-offset:3px}
+.cell.selected{outline:3px solid #2563eb;outline-offset:2px}.cell b{font-size:15px;font-weight:700;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.cell small{font-size:10px;line-height:1.1}
+.flags{position:absolute;right:-4px;top:-6px;border-radius:8px;background:#fff;border:1px solid #d5ddea;color:#6a778e;min-width:17px;padding:2px 4px;font-size:9px}
+.empty{color:#8a95a8;font-size:12px}.legend{display:flex;align-items:center;gap:8px;color:#6b7891;font-size:11px;flex-wrap:wrap;margin:8px 0}
+.scale{height:8px;width:110px;border-radius:5px;background:linear-gradient(90deg,#d2efe1 0% 33.33%,#ffe0b3 33.33% 66.66%,#f4b5b5 66.66% 100%)}
+@media(max-width:480px){.cell{width:58px;height:58px}.grid{gap:9px}.cell b{font-size:14px}}
+</style></head><body><div id="root"></div><script>
+const send=(type,extra={})=>window.parent.postMessage({isStreamlitMessage:true,type,...extra},"*");
+let selected=null,args={},eventCounter=0;
+function color(errors,max,valid){
+ if(!valid)return {bg:"#f1f3f8",ink:"#7d889c",border:"#e1e5ee"};
+ if(errors===0)return {bg:'#d2efe1',ink:'#23614d',border:'transparent'};
+ if(max && errors/max<=.5)return {bg:'#ffe0b3',ink:'#825418',border:'transparent'};
+ return {bg:'#f4b5b5',ink:'#963f39',border:'transparent'};
+}
+function layout(){
+ const size=innerWidth<=480?58:66,gap=innerWidth<=480?9:10;
+ document.querySelectorAll('.grid').forEach(grid=>{
+  const count=grid.querySelectorAll('.cell').length,maxCols=Math.max(1,Math.floor((grid.clientWidth+gap)/(size+gap)));
+  const cols=Math.min(maxCols,Math.ceil(count/Math.ceil(count/maxCols)));
+  grid.style.gridTemplateColumns='repeat('+cols+','+size+'px)';
+ });
+}
+function render(){
+ const root=document.getElementById("root");root.replaceChildren();
+ const rows=args.rows||[],maximum=Math.max(0,...rows.map(q=>q.errors));
+ for(const type of ["选择题","填空题","解答题","未分类"]){
+  const values=rows.filter(q=>q.question_type===type);if(!values.length)continue;
+  const section=document.createElement("section");section.className="section";const heading=document.createElement("h3");
+  heading.textContent=type==="未分类"?"待确认题型":type;section.appendChild(heading);
+  const grid=document.createElement("div");grid.className="grid";let parent="";
+  for(const q of values){
+   if(q.parent && q.parent!==parent){const label=document.createElement("div");label.className="parent";label.textContent="第 "+q.parent+" 题";grid.appendChild(label);parent=q.parent;}
+   const button=document.createElement("button");button.type="button";button.className="cell"+((selected||args.selected)===q.id?" selected":"");button.dataset.qid=q.id;
+   const c=color(q.errors,maximum,q.valid);Object.assign(button.style,{background:c.bg,color:c.ink,borderColor:c.border});
+   const ratio=q.ratio===null?"暂无有效提交":(q.ratio*100).toFixed(1)+"%";
+   const tip="题号 "+q.label+"｜判错 "+q.errors+" 人｜已判 "+q.valid+" 人｜错误比例 "+ratio+"｜未判定 "+q.pending+"｜留白 "+q.not_submitted+"｜无法识别 "+q.unreadable;
+   button.title=tip;button.setAttribute("aria-label",tip);button.setAttribute("aria-pressed",String((selected||args.selected)===q.id));
+   const number=document.createElement("b");number.textContent=q.label;const count=document.createElement("small");count.textContent=q.valid?q.errors+" 人错误":"未判定";
+   button.append(number,count);
+   const flagged=q.pending+q.unreadable;
+   if(flagged){const flag=document.createElement("span");flag.className="flags";flag.textContent=flagged;button.appendChild(flag);}
+   button.addEventListener("click",()=>{selected=q.id;send("streamlit:setComponentValue",{value:{id:q.id,event_id:Date.now()+":"+(++eventCounter)},dataType:"json"});render();});
+   grid.appendChild(button);
+  }
+  section.appendChild(grid);root.appendChild(section);
+ }
+ const legend=document.createElement("div");legend.className="legend";legend.append("判错人数：0 ");
+ const scale=document.createElement("span");scale.className="scale";legend.append(scale," "+maximum+" 人"," · 绿：0人 · 橙：较少 · 红：较多 · 灰：未判定");root.appendChild(legend);
+ layout();requestAnimationFrame(()=>send("streamlit:setFrameHeight",{height:Math.ceil(document.getElementById("root").getBoundingClientRect().height)+8}));
+}
+window.addEventListener("message",ev=>{if(ev.source===window.parent && ev.data.type==="streamlit:render"){args=ev.data.args;selected=args.selected||null;render();}});
+new ResizeObserver(()=>{layout();send("streamlit:setFrameHeight",{height:Math.ceil(document.getElementById("root").getBoundingClientRect().height)+8});}).observe(document.body);
+send("streamlit:componentReady",{apiVersion:1});
+</script></body></html>

@@ -1,0 +1,38 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><style>
+*{box-sizing:border-box}body{margin:0;color:#26324b;background:transparent;font:13px Inter,"Segoe UI","Microsoft YaHei",sans-serif}
+#root{padding:8px;display:flow-root}.wrap{display:flex;justify-content:center;align-items:center;min-height:300px}
+svg{width:100%;max-width:410px;height:auto;overflow:visible}.sector{cursor:pointer;transition:opacity .15s;outline:none}
+.sector:hover{opacity:.85}.sector:focus-visible{stroke:#1c3f90;stroke-width:4px}.sector.active{stroke:#fff;stroke-width:4px}
+text{pointer-events:none;fill:#fff;text-anchor:middle;font-weight:600;font-size:13px;paint-order:stroke;stroke:#182b5c20;stroke-width:1px}
+.empty{text-align:center;color:#8b95a7;padding:80px 15px}
+</style></head><body><div id="root"></div><script>
+const send=(type,extra={})=>window.parent.postMessage({isStreamlitMessage:true,type,...extra},"*");
+let args={},eventCounter=0;
+function render(){
+ const root=document.getElementById("root");root.replaceChildren();const rows=args.rows||[];
+ if(!rows.length){root.textContent="暂无已归类错题";return}
+ const ns="http://www.w3.org/2000/svg",svg=document.createElementNS(ns,"svg");svg.setAttribute("viewBox","0 0 360 330");svg.setAttribute("role","group");svg.setAttribute("aria-label","主要错因饼图");
+ const title=document.createElementNS(ns,"title");title.textContent="主要错因占已归类错题的比例";svg.append(title);
+ let angle=-Math.PI/2;
+ rows.forEach(q=>{
+  const end=angle+Math.PI*2*q.count/args.total,r=136,cx=180,cy=162;
+  const point=a=>[cx+r*Math.cos(a),cy+r*Math.sin(a)];let path;
+  if(rows.length===1){path=document.createElementNS(ns,"circle");path.setAttribute("cx",cx);path.setAttribute("cy",cy);path.setAttribute("r",r)}
+  else{const a=point(angle),b=point(end);path=document.createElementNS(ns,"path");path.setAttribute("d","M "+cx+" "+cy+" L "+a.join(" ")+" A "+r+" "+r+" 0 "+(end-angle>Math.PI?1:0)+" 1 "+b.join(" ")+" Z")}
+  path.setAttribute("fill",q.color);path.setAttribute("class","sector"+(args.selected===q.label?" active":""));path.setAttribute("tabindex","0");path.setAttribute("role","button");path.setAttribute("aria-pressed",String(args.selected===q.label));
+  const label=q.label+" · "+q.count+"题 · "+q.percent_label+"%";
+  path.setAttribute("aria-label",label);path.dataset.label=q.label;
+  const tip=document.createElementNS(ns,"title");tip.textContent=label;path.append(tip);
+  const select=()=>send("streamlit:setComponentValue",{value:{label:q.label,event_id:Date.now()+":"+(++eventCounter)},dataType:"json"});
+  path.addEventListener("click",select);path.addEventListener("keydown",ev=>{if(ev.key==="Enter"||ev.key===" "){ev.preventDefault();select()}});
+  svg.append(path);
+  if(q.percent>=7){const mid=(angle+end)/2,tx=rows.length===1?cx:cx+88*Math.cos(mid),ty=rows.length===1?cy:cy+88*Math.sin(mid);const text=document.createElementNS(ns,"text");const rgb=q.color.slice(1).match(/../g).map(x=>parseInt(x,16));text.style.fill=(rgb[0]*.299+rgb[1]*.587+rgb[2]*.114)>125?"#25304b":"#fff";text.setAttribute("x",tx);text.setAttribute("y",ty-3);const a=document.createElementNS(ns,"tspan");a.textContent=q.count+"题";a.setAttribute("x",tx);const b=document.createElementNS(ns,"tspan");b.textContent=q.percent_label+"%";b.setAttribute("x",tx);b.setAttribute("dy","19");text.append(a,b);svg.append(text)}
+  angle=end;
+ });
+ const wrap=document.createElement("div");wrap.className="wrap";wrap.append(svg);root.append(wrap);
+ requestAnimationFrame(()=>send("streamlit:setFrameHeight",{height:Math.ceil(root.getBoundingClientRect().height)+6}));
+}
+window.addEventListener("message",ev=>{if(ev.source===window.parent&&ev.data.type==="streamlit:render"){args=ev.data.args;render()}});
+new ResizeObserver(()=>send("streamlit:setFrameHeight",{height:Math.ceil(document.getElementById("root").getBoundingClientRect().height)+6})).observe(document.body);
+send("streamlit:componentReady",{apiVersion:1});
+</script></body></html>
