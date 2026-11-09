@@ -4,6 +4,7 @@ import streamlit as st
 
 from core import uploads as u
 from core.product import digest
+from core.limits import auto_resume
 from ui.experience import surface
 
 
@@ -17,7 +18,7 @@ def teacher_upload(rt, mode, save):
     limit=size*1024*1024
     with surface(key=root):
         st.subheader('批量上传学生 PDF' if pdf else '上传单名学生的作业图片')
-        st.caption('每名学生一份 PDF，一次导入全班作业。' if pdf else '适合手机拍摄，可上传同一名学生的多张作业照片。')
+        st.caption('每名学生一份 PDF，文件命名为「学号.pdf」，例如 20260108.pdf。' if pdf else '适合手机拍摄，可上传同一名学生的多张作业照片。')
         st.caption(f'每次最多 {maximum} 份 · 单文件最多 {size} MB · 合计最多 512 MB'+
                    (' · 每份 PDF 最多 24 页' if pdf else ' · PNG / JPG / WEBP'))
         files=st.file_uploader('选择或拖入 PDF' if pdf else '选择或拖入同一学生的照片',
@@ -26,7 +27,7 @@ def teacher_upload(rt, mode, save):
         if files:
             total=sum(f.size for f in files)
             display_size=f'{total/1024**2:.1f} MB' if total>=1024**2 else f'{total/1024:.1f} KB'
-            st.caption(f'已上传 {len(files)} / {maximum} 份 · {display_size}。可用上传列表的 × 删除或替换单个文件。')
+            st.caption(f'已上传 {len(files)} / {maximum} 份 · {display_size}。')
         signature=tuple(f.file_id for f in files)
         queue=st.session_state.setdefault(prefix,{'signature':None,'documents':{},'states':{},'order':[]})
         if queue['signature']!=signature:
@@ -53,6 +54,12 @@ def review_upload(rt,queue,prefix,mode,limit,save,root,version):
     pdf=mode=='pdf'
     documents,order,states=(queue[key] for key in ('documents','order','states'))
     duplicates=u.duplicate_files(documents)
+    overrides=queue.setdefault('student_overrides',{})
+    roster=rt.w.get('student_roster',[])
+    if not pdf:
+        overrides.clear()
+        overrides[order[0]]=st.text_input('这份图片作业的学号（可选）',key=prefix+'_photo_student',max_chars=32)
+    identities,identity_errors=u.identify_materials(documents,order,mode=mode,overrides=overrides,roster=roster)
     statuses={}
     display=[]
     complete=0
@@ -61,14 +68,16 @@ def review_upload(rt,queue,prefix,mode,limit,save,root,version):
         doc=documents[key]
         state=states.get(doc['file_id'],{})
         error=doc['error'] or ('文件内容重复，请移除副本。' if key in duplicates else '')
-        statuses[key]=error
+        statuses[key]=error or identity_errors.get(key,'')
         done=len(state.get('drafts',{}))
         pages=len(state.get('pages',[]))
         recognized+=done
         complete+=bool(pages and done==pages and not error)
+        number,source=identities.get(key if pdf else order[0],('',''))
         display.append({'序号':index,'文件':doc['name'],
+                        '归属':(number+' · '+('文件名匹配' if source=='filename' else '教师指定')) if number else '未匹配 · 仅教师可见',
                         '识别进度':f'{done} / {pages} 页' if pages else '待解析',
-                        '状态':error or state.get('error') or ('已识别' if pages and done==pages else '待识别')})
+                        '状态':statuses[key] or state.get('error') or ('已识别' if pages and done==pages else '待识别')})
     st.dataframe(display,hide_index=True,width='stretch',height=min(350,38+35*len(display)))
     st.progress(complete/len(order),text=f'{complete} / {len(order)} 份文件已识别 · 共 {recognized} 页')
     names={key:f'{index}. {documents[key]["name"]}' for index,key in enumerate(order,1)}
@@ -76,6 +85,18 @@ def review_upload(rt,queue,prefix,mode,limit,save,root,version):
                           order,format_func=names.get,key=prefix+'_selected')
     doc=documents[selected]
     state=states.get(doc['file_id'],{})
+    if pdf:
+        with st.expander('修正所选文件的学号'):
+            st.caption('留空使用文件名。填写学号可改归属；填写「匿名」仅供教师查看。')
+            override_key=prefix+'_student_'+selected
+            def update_identity():
+                overrides[selected]=st.session_state[override_key]
+            st.text_input('改填学号或匿名',value=overrides.get(selected,''),key=override_key,
+                          max_chars=32,on_change=update_identity)
+    if identity_errors:
+        st.warning('选择有异常的文件，打开「修正所选文件的学号」。')
+    elif pdf and len(identities)<len(order):
+        st.caption(f'{len(order)-len(identities)} 份文件暂未匹配学号。可修正学号，或保留为仅教师可见的匿名作答。')
     if not pdf:
         pos=order.index(selected)
         up,down=st.columns(2)
@@ -95,12 +116,11 @@ def review_upload(rt,queue,prefix,mode,limit,save,root,version):
                 draft=state['drafts'][number-1]
                 st.caption(f"本页识别到 {len(draft['records'])} 条题目、{len(draft['answers'])} 条独立作答。")
                 if draft.get('reused_question_page'):st.caption('本页复用了本批中完全相同的试题页。')
-                if draft.get('split_page'):st.caption('本页分区识别，请对照原图核对分界处。')
+                if draft.get('split_page'):st.caption('本页分段识别。请核对跨段的题干和作答。')
     if duplicates:st.warning('发现重复文件，请从上传列表移除副本。')
-    st.caption('全部页面识别完成后，会按题号匹配本份作业的题目和作答。整份作业确实未答的题计错。')
     if state.get('error'):
         st.warning(doc['name']+' · '+state['error'])
-    consent=st.checkbox('文件已匿名化，同意发送页面图像进行识别。',key=prefix+'_consent')
+    consent=st.checkbox('作答页面已去除姓名等个人信息，同意发送页面图像进行识别。',key=prefix+'_consent')
     ready=consent and rt.ready()
     active=[key for key in order if not statuses[key]]
     unfinished=any(not states.get(documents[k]['file_id'],{}).get('pages') or
@@ -108,12 +128,13 @@ def review_upload(rt,queue,prefix,mode,limit,save,root,version):
                    for k in active)
     start,retry=st.columns(2)
     started=recognized or any(s.get('splits') for s in states.values())
-    run=start.button('识别下一批页面' if started else '开始识别作业',key=prefix+'_run',
-                     type='primary',disabled=not (ready and unfinished))
+    run=start.button('继续识别未完成的页面' if started else '开始识别作业',key=prefix+'_run',
+                     type='primary',disabled=not (ready and unfinished) or bool(identity_errors))
     single=retry.button('重试当前文件',key=prefix+'_retry',
-                        disabled=not (ready and not statuses[selected] and state.get('error')))
+                        disabled=not (ready and not statuses[selected] and state.get('error')) or bool(identity_errors))
     if run or single:
         progress=st.empty()
+        wait=st.empty()
         keys=([selected] if pdf else order[:order.index(selected)+1]) if single else active
         if mode=='photos' and len(active)!=len(order):
             st.warning('请先处理照片冲突，再按页序识别。')
@@ -122,28 +143,30 @@ def review_upload(rt,queue,prefix,mode,limit,save,root,version):
             finished=sum(len(s['drafts']) for s in states.values())
             stage=region if region=='复用相同题面' else f'正在识别{region}' if region else '等待识别服务返回本页结果'
             progress.info(f'{name} · 第 {page} / {total} 页 · {stage}。本批已完成 {finished} 页。')
-        def call_page(*args,**kwargs):
-            with st.spinner('正在等待当前识别请求',show_time=True):
-                return rt.call(*args,**kwargs)
-        queue['notice']=u.process_pages(documents,keys,states,call_page,mode=mode,limit_bytes=limit,progress=update)
+        from ui.product import show_wait
+        request=auto_resume(rt.call,lambda _,seconds:show_wait(wait,seconds,'识别'))
+        with st.spinner('正在处理作业页面',show_time=True):
+            queue['notice']=u.process_pages(documents,keys,states,request,mode=mode,limit_bytes=limit,
+                                            budget=None,progress=update)
         rt.persist()
         st.rerun()
     if queue.get('notice'):st.info(queue['notice'])
     if not rt.ready():st.info('AI 服务尚未启用。文件可先上传，配置服务后再识别。')
-    if complete!=len(order):return
+    if complete!=len(order) or identity_errors:return
     try:
-        materials,rows=u.assemble_materials(documents,order,states,mode=mode)
+        materials,rows=u.assemble_materials(documents,order,states,mode=mode,overrides=overrides,roster=roster)
     except ValueError as exc:
         st.warning(str(exc))
         if st.button('重新识别所选页',key=prefix+'_retry_link',disabled=not ready):
             for index in range(number-1,len(state['pages'])):
                 state['drafts'].pop(index,None)
                 state.get('splits',{}).pop(index,None)
+                state.get('compact_regions',{}).pop(index,None)
                 state.setdefault('fresh_pages',set()).add(index)
             st.rerun()
         return
     st.subheader('校对识别结果')
-    st.caption('可修正题干、作答和题型，或取消保留误识别的题目。')
+    st.caption('对照原卷修改识别文字。误识别的题可以取消勾选「保留」。')
     columns={'keep':'保留','source_file':'作业文件','source_pages':'来源页','question_no':'题号','question_type':'题型',
              'parent_question_no':'大题号','subquestion_no':'小问号','question':'题目','steps':'解题步骤','answer':'最终答案'}
     editable=list(columns)

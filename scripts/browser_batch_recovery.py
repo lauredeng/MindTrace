@@ -18,7 +18,7 @@ with sync_playwright() as p:
    field=page.get_by_role('combobox',name='离线故障场景',exact=True);field.fill(value);field.press('ArrowDown');page.get_by_role('option',name=value,exact=True).click();idle()
   def click(label):page.get_by_role('button',name=label,exact=True).click();idle()
   if mode!='全部失败':select(mode)
-  click('进入教师工作台');click('批改操作');click('开始批改并分析错题')
+  click('进入教师工作台');click('开始批改')
   page.get_by_text(status,exact=True).wait_for(timeout=60000)
   assert page.get_by_role('button',name=action,exact=True).is_enabled()
   assert '离线请求尝试：'+str(count) in page.inner_text('body')

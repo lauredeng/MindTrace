@@ -42,7 +42,7 @@ with sync_playwright() as p:
     mobile.goto('http://127.0.0.1:8505')
     mobile.get_by_role('button',name='进入教师工作台',exact=True).wait_for(timeout=60000)
     mobile.get_by_role('button',name='进入教师工作台',exact=True).click()
-    mobile.get_by_role('button',name='开始批改并分析错题',exact=True).wait_for(timeout=30000)
+    mobile.get_by_role('button',name='开始批改',exact=True).wait_for(timeout=30000)
     mobile.wait_for_timeout(800)
     assert not mobile.evaluate('document.documentElement.scrollWidth>innerWidth')
     mobile.screenshot(path=str(OUT/'10-mobile-grading.png'),full_page=True)

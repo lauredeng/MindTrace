@@ -7,6 +7,7 @@ import hashlib,hmac,json,os,re,secrets,tempfile
 from core import classroom as c,storage,education as e
 from core.limits import UsageLimiter, Limits, UsageLimitError
 from core.settings import integer_setting
+from core.uploads import school_number
 
 DENIED='课堂访问码无效或已失效。'
 MISSING=object()
@@ -31,7 +32,7 @@ def _write_meta(folder,meta):
     finally:
         if Path(name).exists():Path(name).unlink()
 
-def create(name,root=None,*,creator_id='server-script'):
+def create(name,root=None,*,creator_id='server-script',number_demo=False):
     name=e.text(name,80,'课堂名称');class_id=secrets.token_hex(16);token=secrets.token_urlsafe(32)
     folder=_folder(class_id,root)
     with CREATION_LIMITER.request(creator_id,1,CREATION_LIMITS):
@@ -41,14 +42,28 @@ def create(name,root=None,*,creator_id='server-script'):
             if parent.exists() and sum(1 for child in parent.iterdir() if child.is_dir())>=maximum:
                 raise UsageLimitError('课堂存储数量已达上限，请联系管理员；已有课堂仍可连接。')
             folder.mkdir(parents=True,exist_ok=False)
-            _write_meta(folder,{'name':name,'teacher_hash':_hash(token),'students':{},'created_at':c.now()})
+            _write_meta(folder,{'name':name,'teacher_hash':_hash(token),'students':{},'number_demo':bool(number_demo),'created_at':c.now()})
             c.save(c.new_workspace(),folder/'workspace.json')
     return class_id+'.'+token
+
+def has_student_number(w,number):
+    roster=w.get('student_roster',[])
+    if roster:return number in roster
+    return any(s['student_id']==number and s.get('batch_id') and s.get('source')!='self_study'
+               for s in w['submissions'])
+
+
+def demo_code(class_id,number):
+    if not re.fullmatch(r'[a-f0-9]{32}',class_id.strip()):
+        raise ValueError('演示课堂码无效。')
+    return class_id.strip()+'.'+school_number(number)
+
 
 def resolve(code,root=None):
     if not isinstance(code,str) or len(code)>130 or code.count('.')!=1:raise ValueError(DENIED)
     class_id,token=code.strip().split('.')
-    if not re.fullmatch(r'[A-Za-z0-9_-]{40,64}',token):raise ValueError(DENIED)
+    demo_student=bool(re.fullmatch(r'[0-9]{1,32}',token))
+    if not demo_student and not re.fullmatch(r'[A-Za-z0-9_-]{40,64}',token):raise ValueError(DENIED)
     folder=_folder(class_id,root)
     try:meta=json.loads((folder/'access.json').read_text(encoding='utf-8'))
     except (OSError,ValueError):raise ValueError(DENIED) from None
@@ -56,13 +71,20 @@ def resolve(code,root=None):
         or not re.fullmatch(r'[a-f0-9]{64}',meta['teacher_hash']) or not isinstance(meta.get('students'),dict)
         or any(not isinstance(k,str) or not isinstance(v,str) or not re.fullmatch(r'[a-f0-9]{64}',v) for k,v in meta['students'].items())):
         raise ValueError(DENIED)
-    digest=_hash(token)
-    if hmac.compare_digest(meta['teacher_hash'],digest):role,sid='teacher',None
+    number_demo=meta.get('number_demo') is True
+    if demo_student:
+        if not number_demo or not has_student_number(c.load(folder/'workspace.json'),token):
+            raise ValueError(DENIED)
+        role,sid='student',token
     else:
-        sid=next((sid for sid,hashed in meta['students'].items() if hmac.compare_digest(hashed,digest)),None)
-        if sid is None:raise ValueError(DENIED)
-        role='student'
-    return {'class_id':class_id,'name':meta['name'],'role':role,'student_id':sid,'code':code.strip()}
+        digest=_hash(token)
+        if hmac.compare_digest(meta['teacher_hash'],digest):role,sid='teacher',None
+        else:
+            sid=next((sid for sid,hashed in meta['students'].items() if hmac.compare_digest(hashed,digest)),None)
+            if sid is None:raise ValueError(DENIED)
+            role='student'
+    return {'class_id':class_id,'name':meta['name'],'role':role,'student_id':sid,'code':code.strip(),
+            'number_demo':number_demo}
 
 def invite(teacher_code,student_id,root=None):
     with storage.LOCK:
@@ -76,6 +98,7 @@ def invite(teacher_code,student_id,root=None):
 
 def student_view(w,sid):
     view=deepcopy(w)
+    view.pop('student_roster',None)
     own=[s for s in w['submissions'] if s['student_id']==sid];ids={s['id'] for s in own}
     view['submissions']=[e.student_material(w,s) for s in own]
     view['notebook']=[n for n in view['notebook'] if n['student_id']==sid]
@@ -124,7 +147,7 @@ def _merge(base,ours,theirs):
     raise ValueError('同一记录发生并发修改，请刷新课堂后重试。')
 
 def _student_changes(base,after,sid):
-    for key in ('schema_version','id','batches','reviews','tasks'):
+    for key in ('schema_version','id','batches','reviews','tasks','student_roster'):
         if after.get(key)!=base.get(key):raise ValueError('学生不能修改教师记录。')
     for key in ('submissions','notebook','learning','attempts','study_sessions'):
         old={r['id']:r for r in base[key]};new={r['id']:r for r in after[key]}

@@ -53,6 +53,13 @@ def validate_workspace(data):
         ids = [item.get('id') for item in data[key] if isinstance(item, dict)]
         if len(ids) != len(data[key]) or any(not isinstance(k, str) or not 0 < len(k) <= 100 for k in ids) or len(set(ids)) != len(ids):
             raise ValueError('工作区记录缺少有效唯一ID。')
+    if 'student_roster' in data:
+        from core.uploads import parse_roster
+        roster=data['student_roster']
+        if (not isinstance(roster,list) or len(roster)>1000 or
+            any(not isinstance(number,str) or len(number)>32 for number in roster) or
+            parse_roster(' '.join(roster))!=roster):
+            raise ValueError('班级学号名单格式无效。')
     validate_links(data)
     # No config or secret objects are part of this schema.
     clean = {key: deepcopy(data[key]) for key in ('schema_version', 'id', 'revision', 'submissions', 'reviews', 'tasks', 'learning', 'attempts', 'events', 'usage')}
@@ -62,6 +69,7 @@ def validate_workspace(data):
     clean['storage_version'] = generation
     for key in ('batches', 'notebook', 'book_events', 'study_sessions'):
         clean[key] = deepcopy(data.get(key, []))
+    if 'student_roster' in data:clean['student_roster']=list(data['student_roster'])
     return clean
 
 

@@ -1,5 +1,6 @@
 """Server-funded DeepSeek by default. Keys never enter business records."""
 import json
+import math
 import os
 import re
 import time
@@ -53,6 +54,10 @@ def ai_ready():
         return False
 
 
+class ServiceUnavailable(RuntimeError):
+    """Provider transport or service failure, distinct from invalid model data."""
+
+
 class OutputTruncatedError(ValueError):
     """The provider stopped at the output length limit."""
 
@@ -62,8 +67,8 @@ class InvalidModelJSON(ValueError):
 
 
 def completion(messages, *, vision=False, json_output=False, max_tokens=1800, api_key=None,
-               session_id='server-script', purpose='legacy'):
-    units = request_units(messages, max_tokens)
+               session_id='server-script', purpose='legacy', reasoning_effort=None):
+    units = request_units(messages,max_tokens,output_limit=9500 if not vision and purpose in ('quick_grading','error_analysis') else 5000)
     cfg = config() if api_key is None else {
         'key': api_key.strip(), 'base_url': 'https://api.deepseek.com',
         'model': 'deepseek-flash', 'vision_model': 'deepseek-flash',
@@ -90,6 +95,8 @@ def completion(messages, *, vision=False, json_output=False, max_tokens=1800, ap
                 # SDK retries remain off; each controlled retry is separately admitted.
                 with OpenAI(api_key=cfg['key'], base_url=cfg['base_url'], timeout=timeout, max_retries=0) as client:
                     kwargs = dict(model=model, messages=messages, max_tokens=max_tokens, stream=False)
+                    if reasoning_effort and target.hostname=='api.deepseek.com' and model in ('deepseek-flash','deepseek-v4-pro'):
+                        kwargs['reasoning_effort']=reasoning_effort
                     if json_output:
                         kwargs['response_format'] = {'type': 'json_object'}
                     response = client.chat.completions.create(**kwargs)
@@ -101,6 +108,9 @@ def completion(messages, *, vision=False, json_output=False, max_tokens=1800, ap
                 raise ValueError('模型输出未完整结束，本题尚未完成。')
             content = (response.choices[0].message.content or '').strip()
             if not content:
+                if json_output:
+                    status='invalid_json'
+                    raise InvalidModelJSON('模型未返回可读取的结果。')
                 raise ValueError('模型返回了空内容，请稍后重试。')
             content = content.replace(cfg['key'], '[凭据已隐藏]')
             if json_output and vision and purpose == 'ocr':
@@ -121,11 +131,11 @@ def completion(messages, *, vision=False, json_output=False, max_tokens=1800, ap
         except APITimeoutError:
             status = 'timeout'
             if attempt == retries:
-                raise RuntimeError('AI 请求超时，请稍后重试。') from None
+                raise ServiceUnavailable('AI 请求超时，请稍后重试。') from None
         except APIConnectionError:
             status = 'connection_error'
             if attempt == retries:
-                raise RuntimeError('AI 服务暂时无法连接，请稍后重试。') from None
+                raise ServiceUnavailable('AI 服务暂时无法连接，请稍后重试。') from None
         except APIStatusError as exc:
             status = 'http_' + str(exc.status_code)
             retryable = exc.status_code == 429 or exc.status_code >= 500
@@ -134,7 +144,18 @@ def completion(messages, *, vision=False, json_output=False, max_tokens=1800, ap
                            401: 'AI 服务授权暂不可用，请联系演示提供者。',
                            402: 'AI 服务余额不足，请联系演示提供者。',
                            429: 'AI 服务调用较频繁，请稍后重试。'}.get(exc.status_code, 'AI 服务暂时不可用，请稍后重试。')
-                raise RuntimeError(message) from None
+                if exc.status_code==429:
+                    raw=exc.response.headers.get('retry-after')
+                    try:
+                        delay=float(raw) if raw else 5
+                    except ValueError:
+                        delay=5
+                    delay=max(1,delay) if math.isfinite(delay) and delay>=0 else None
+                    raise UsageLimitError(message,retry_after=delay,reason='provider') from None
+                if exc.status_code in (401,402,403):
+                    raise UsageLimitError(message,retry_after=None,reason='provider_configuration') from None
+                error=ServiceUnavailable if exc.status_code>=500 else RuntimeError
+                raise error(message) from None
         finally:
             record_usage(session_id, purpose, model, response, started, status, attempt, cfg)
 

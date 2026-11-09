@@ -1,5 +1,5 @@
 """Bounded request metadata only: no prompts, responses, images or credentials."""
-from collections import deque
+from collections import Counter, defaultdict, deque
 from datetime import datetime, timezone
 from threading import Lock
 from uuid import uuid4
@@ -40,3 +40,24 @@ def for_session(session_id):
     with _LOCK:
         return [dict(event) for event in _EVENTS if event['session_id'] == session_id]
 
+
+
+def by_purpose(events):
+    groups=defaultdict(list)
+    for event in events:
+        groups[event['purpose']].append(event)
+    results=[]
+    for purpose,group in sorted(groups.items()):
+        counts=Counter(event['status'] for event in group)
+        costed=[event for event in group if event.get('estimated_cost') is not None]
+        results.append({
+            'purpose':purpose,'requests':len(group)-counts['blocked'],'completed':counts['completed'],
+            'truncated':counts['truncated'],'invalid_json':counts['invalid_json'],'blocked':counts['blocked'],
+            'prompt_tokens':sum(event.get('prompt_tokens') or 0 for event in group),
+            'completion_tokens':sum(event.get('completion_tokens') or 0 for event in group),
+            'request_seconds':round(sum(event.get('elapsed_seconds',0) for event in group if event['status']!='blocked'),2),
+            'estimated_cost':round(sum(event['estimated_cost'] for event in costed),6) if costed and
+                len({event.get('currency') for event in costed})==1 else None,
+            'priced_responses':len(costed),
+        })
+    return results

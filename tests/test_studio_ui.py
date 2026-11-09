@@ -59,6 +59,7 @@ def test_default_general_home_and_complete_teacher_student_loop(studio):
     click(at,'学生')
     route(at,'专项练习')
     assert not at.exception
+    next(s for s in at.selectbox if s.label=='我的匿名学习编号').select_index(0).run()
     click(at,'开始这次学习')
     assert at.session_state['studio_workspace']['tasks'][0]['status']=='in_progress'
     click(at,'先问我一个诊断问题')

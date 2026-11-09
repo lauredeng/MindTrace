@@ -57,9 +57,10 @@ def student(rt, view='tasks'):
             st.markdown('<div class="empty-state student-empty"><b>你的下一次进步，从一道题开始。</b><p>收到老师的任务包后，可以直接进入原始错题。<br>也可以点击上方「自主拍题 / 文本学习」，从自己的困惑开始。</p><div class="learning-pipeline"><span>理解问题</span><span>分级提示</span><span>独立训练</span><span>记录证据</span></div></div>',unsafe_allow_html=True)
             return
         student_ids=sorted({t['student_id'] for t in rt.w['tasks']})
-        current=st.session_state.get('studio_current_student')
-        sid=st.selectbox('我的匿名学习编号',student_ids,index=student_ids.index(current) if current in student_ids else 0)
-        st.session_state.studio_current_student=sid
+        current=rt.assigned_student or st.session_state.get('studio_legacy_student')
+        sid=st.selectbox('我的匿名学习编号',student_ids,index=student_ids.index(current) if current in student_ids else None)
+        if sid is None:return
+        st.session_state['studio_legacy_student']=sid
         own=[t for t in rt.w['tasks'] if t['student_id']==sid]
         focus=st.session_state.pop('focus_task_id',None)
         task_ids=[t['id'] for t in own]
@@ -203,8 +204,9 @@ def profiles(rt):
     if not ids:
         st.info('暂无学习证据。请先提交材料或完成任务。')
         return
-    current=st.session_state.get('studio_current_student')
-    sid=st.selectbox('查看匿名学习编号',ids,index=ids.index(current) if current in ids else 0)
+    current=rt.assigned_student or st.session_state.get('studio_legacy_student')
+    sid=st.selectbox('查看匿名学习编号',ids,index=ids.index(current) if current in ids else None)
+    if sid is None:return
     tasks=[t for t in rt.w['tasks'] if t['student_id']==sid]
     attempts=[a for a in rt.w['attempts'] if a['student_id']==sid]
     a,b,c=st.columns(3)
@@ -233,7 +235,15 @@ def records(rt):
     b.metric('已返回输入 tokens',sum(e.get('prompt_tokens') or 0 for e in usage))
     c.metric('已返回输出 tokens',sum(e.get('completion_tokens') or 0 for e in usage))
     if usage:
-        st.dataframe(pd.DataFrame(usage).drop(columns=['session_id'],errors='ignore'),hide_index=True,width='stretch')
+        from core.usage import by_purpose
+        st.subheader('按处理阶段汇总')
+        st.dataframe(by_purpose(usage),hide_index=True,width='stretch',column_config={
+            'purpose':'阶段','requests':'请求次数','completed':'接口成功','truncated':'截断',
+            'invalid_json':'格式异常','blocked':'本地限流','prompt_tokens':'输入 tokens',
+            'completion_tokens':'输出 tokens','request_seconds':'请求累计秒数',
+            'estimated_cost':'已计价响应估算','priced_responses':'有估算的响应数'})
+        with st.expander('查看单次请求记录'):
+            st.dataframe(pd.DataFrame(usage).drop(columns=['session_id'],errors='ignore'),hide_index=True,width='stretch')
     st.caption('usage来自真实接口响应，失败可能没有usage。费用需配置单价才估算，缓存折扣未建模，不是服务商账单。')
     with st.expander('幂等操作与版本记录'):
         st.dataframe(pd.DataFrame(rt.w['events']),hide_index=True,width='stretch')

@@ -6,10 +6,10 @@ from collections import Counter
 import hashlib
 import json
 import re
-from core import education as e, classroom as c, math_tools
+from core import education as e, classroom as c, math_tools, answer_keys
 from core.limits import UsageLimitError
 from core.execution import batch_lease
-from core.ai import OutputTruncatedError
+from core.ai import InvalidModelJSON, OutputTruncatedError, ServiceUnavailable
 from core.records import BATCH_LIMIT
 
 CLASSROOM_POLICY = 'classroom_answer_first'
@@ -42,8 +42,12 @@ def category(value):
         raise ValueError('错因类别无效。')
     return value
 
+def current_records(sub,key):
+    return [r for r in sub.get(key,[]) if r.get('reference_revision')==sub.get('reference_revision')]
+
+
 def latest(sub,key):
-    record = next((r for r in reversed(sub.get(key,[])) if r.get('status')=='completed'
+    record = next((r for r in reversed(sub.get(key,[]) if key=='solutions' else current_records(sub,key)) if r.get('status')=='completed'
                    and (key != 'solutions' or not math_tools.reference_conflicts(r.get('correction',{}).get('reference_tool',{})))),None)
     return guarded_quick(record) if key == 'quick_checks' and record else record
 
@@ -77,16 +81,31 @@ def grading_conflicts(verdict, final, tool, answer_only):
     return math_tools.quick_conflicts(verdict,final,tool)
 
 
-def call_grading(call, prompt, payload, purpose, max_tokens):
+def call_grading(call, prompt, payload, purpose, max_tokens, *, retry_tokens=None, reasoning_effort=None,
+                 compact_only=False):
     data=json.dumps(payload,ensure_ascii=False)
     options=dict(purpose=purpose,json_output=True,max_tokens=max_tokens)
+    if reasoning_effort:options['reasoning_effort']=reasoning_effort
+    if not compact_only:
+        try:
+            return call(prompt,data,**options)
+        except (OutputTruncatedError,InvalidModelJSON) as exc:
+            if isinstance(exc,InvalidModelJSON) and retry_tokens is None:raise
+    brief='只输出必需的JSON字段。依据压缩成短句，不重复推导或题干。'
+    if purpose=='error_analysis':
+        brief+='保留原步骤对应的简短判断和证据。参考解只写必要步骤，supplements可为空。'
     try:
-        return call(prompt,data,**options)
-    except OutputTruncatedError:
-        brief='只输出必需的JSON字段。依据压缩成短句，不重复推导或题干。'
-        if purpose=='error_analysis':
-            brief+='保留原步骤对应的简短判断和证据。参考解只写必要步骤，supplements可为空。'
-        return call(prompt+'\n'+brief,data,**options)
+        return call(prompt+'\n'+brief,data,**dict(options,max_tokens=retry_tokens or max_tokens))
+    except (RuntimeError,ValueError) as exc:
+        exc.compact_retry=True
+        raise
+
+
+def reference_match(sub,reference):
+    if not reference or unreadable(sub):return None
+    return answer_keys.compare(sub.get('question_type'),sub['answer'],reference['answer'],
+        approximate=bool(re.search(r'近似|精确到|四舍五入|保留.{0,6}位|误差',sub['question'])),
+        has_rubric=bool(reference['rubric']))
 
 
 def is_blank(sub):
@@ -109,12 +128,14 @@ def needs_deep(sub, quick):
         return quick['verdict']=='uncertain'
     return quick['verdict']!='correct'
 
-def quick_check(sub,call,force=False):
+def quick_check(sub,call,force=False,*,reference=None):
     sub.setdefault('quick_checks',[])
     cached=latest(sub,'quick_checks')
-    if cached and cached['fingerprint']==sub['fingerprint'] and not force and sub['quick_checks'][-1]['status']=='completed':
+    if cached and cached['fingerprint']==sub['fingerprint'] and not force and current_records(sub,'quick_checks')[-1]['status']=='completed':
         return cached
     rec={'id':c.uid(),'created_at':c.now(),'fingerprint':sub['fingerprint'],'engine_version':QUICK_VERSION}
+    if sub.get('reference_revision'):rec['reference_revision']=sub['reference_revision']
+    if reference:rec['reference_answer']=reference['answer']
     classroom_mode=sub.get('grading_policy')==CLASSROOM_POLICY
     if classroom_mode and is_blank(sub):
         rec.update(status='completed',verdict='incorrect',final_answer_status='incorrect',
@@ -128,16 +149,46 @@ def quick_check(sub,call,force=False):
         return rec
     try:
         tool=math_tools.evidence(sub)
-        sources={'QUESTION':sub['question'],'ANSWER':sub['answer'],**{'S'+str(i):v for i,v in enumerate(sub['steps'],1)}}
         kind=sub.get('question_type','未分类')
+        if reference:
+            matched=reference_match(sub,reference)
+            if matched is not None:
+                verdict='correct' if matched else 'incorrect'
+                conflicts=grading_conflicts(verdict,verdict,tool,True)
+                rec.update(status='completed',verdict='uncertain' if conflicts else verdict,
+                           final_answer_status=verdict,
+                           basis='按已确认参考答案比对。参考答案：'+reference['answer'],
+                           evidence_quote=sub['answer'],evidence_id='ANSWER',first_error_step=None,
+                           knowledge_points=[],category=UNKNOWN,process_checked=False,answer_only=True,
+                           tool=tool,conflicts=conflicts,grading_method='reference_comparison')
+                sub['quick_checks'].append(rec)
+                return rec
+        sources={'QUESTION':sub['question'],'ANSWER':sub['answer'],**{'S'+str(i):v for i,v in enumerate(sub['steps'],1)}}
         answer_only=kind in ('选择题','填空题')
         if classroom_mode and sub['answer'] and not re.search(r'证明|证得|求证|写出过程|说明理由|论证',sub['question']):
             answer_only=True
         prompt=QUICK_PROMPT
         if classroom_mode:
+            prompt=prompt.replace('必要论证缺失判uncertain','卷面转写清楚且明确缺少必要论证时判incorrect；看不清或题干缺条件才判uncertain')
             prompt+='\n以answer_only字段为准。为true时核对最终答案，不要求过程，first_error_step填null；为false时引用实际步骤，步骤从1开始。'
+            if kind=='选择题':
+                prompt+=' 多选按选项集合判定，顺序与常见分隔符无关；可读的漏选或多选都判错。'
+        if reference:
+            prompt+='\n按已确认参考答案及评分依据批改。接受数学等价形式与有效替代证法；需要证明时须核对步骤。'
+        grading_options={}
+        token_limit=1800
+        if classroom_mode:
+            objective=kind in ('选择题','填空题')
+            token_limit=2800 if objective else 5000
+            grading_options={'retry_tokens':5200 if objective else 8500}
+            if objective:grading_options['reasoning_effort']='low'
+        reference_context={'reference':{k:reference[k] for k in ('answer','rubric')}} if reference else {}
+        if classroom_mode:
+            previous=(current_records(sub,'quick_checks') or [{}])[-1]
+            grading_options['compact_only']=bool(previous.get('compact_retry')) and not force
         p=e.mapping(call_grading(call,prompt,{k:sub[k] for k in ('question','steps','answer','topic')} |
-            {'question_type':kind,'answer_only':answer_only,'optional_tool_evidence':tool,'evidence_sources':sources},'quick_grading',1800))
+            {'question_type':kind,'answer_only':answer_only,'optional_tool_evidence':tool,'evidence_sources':sources} | reference_context,
+            'quick_grading',token_limit,**grading_options))
         if p.get('verdict') not in e.VERDICTS or type(p.get('process_checked')) is not bool:
             raise ValueError('快速批改状态无效。')
         evidence_id=p.get('evidence_id')
@@ -207,6 +258,7 @@ def quick_check(sub,call,force=False):
             rec['category']=UNKNOWN
     except (RuntimeError,ValueError) as exc:
         rec.update(status='failed',error=str(exc),error_type=type(exc).__name__)
+        if getattr(exc,'compact_retry',False):rec['compact_retry']=True
     sub['quick_checks'].append(rec)
     return rec
 
@@ -245,22 +297,30 @@ def validate_correction(p,sub,mode='full'):
         raise ValueError('参考答案或步骤与局部数学工具冲突，本次参考解未发布，请重新分析或人工复核。')
     return out
 
-def deep_analyze(sub,call,force=False,*,teacher_only=False):
-    cached=next((r for r in reversed(sub['analyses']) if r.get('engine_version')==DEEP_VERSION and r.get('status')=='completed'
+def deep_analyze(sub,call,force=False,*,teacher_only=False,reference=None):
+    cached=next((r for r in reversed(current_records(sub,'analyses')) if r.get('engine_version')==DEEP_VERSION and r.get('status')=='completed'
                  and bool(r.get('teacher_only'))==teacher_only),None)
     q=latest(sub,'quick_checks')
     if cached and not force and cached.get('quick_id')==(q or {}).get('id') and sub['analyses'][-1]['status']=='completed' and not math_tools.reference_conflicts(cached.get('correction',{}).get('reference_tool',{})) and not (teacher_only and cached.get('needs_review')):
         return cached
     rec={'id':c.uid(),'created_at':c.now(),'fingerprint':sub['fingerprint'],'engine_version':DEEP_VERSION,
          'quick_id':(q or {}).get('id'),'tool':math_tools.evidence(sub),'teacher_only':teacher_only}
+    if sub.get('reference_revision'):rec['reference_revision']=sub['reference_revision']
     try:
         if teacher_only:
-            prompt=e.ANALYSIS_PROMPT+'\n只核验正误，依据简短，hypotheses、error_patterns、knowledge_points 可为空，不生成参考解或推测错因。'
+            prompt=e.ANALYSIS_PROMPT+'\n只核验正误，依据简短，hypotheses、error_patterns、knowledge_points 可为空，不生成参考解或推测错因。卷面转写清楚且明确缺少必需论证时判 error_found；材料看不清或题干缺条件时判 insufficient_evidence。'
         else:
             prompt=e.ANALYSIS_PROMPT.replace('（不要加其他顶层字段）','')+'\n'+CORRECTION_SCHEMA
+        if reference:
+            prompt+='\n按已确认评分依据核验，接受有效替代解法和等价结果。'
+        quick_context={k:q.get(k) for k in ('verdict','basis','first_error_step')} if q and teacher_only else q
+        reference_context={'reference':{k:reference[k] for k in ('answer','rubric')}} if reference else {}
         raw=call_grading(call,prompt,{k:sub[k] for k in ('question','steps','answer','topic','task_type')} |
-            {'question_type':sub.get('question_type','未分类'),'quick_check':q,'optional_tool_evidence':rec['tool']},
-            'error_analysis',5000)
+            {'question_type':sub.get('question_type','未分类'),'quick_check':quick_context,'optional_tool_evidence':rec['tool']} |
+            reference_context,
+            'error_analysis',6500 if teacher_only else 5000,retry_tokens=9500 if teacher_only else None,
+            compact_only=teacher_only and not force and bool(
+                (current_records(sub,'analyses') or [{}])[-1].get('compact_retry')))
         rec['analysis']=e.validate_analysis(raw,sub)
         if not teacher_only:
             rec['correction']=validate_correction(raw.get('correction'),sub)
@@ -268,6 +328,7 @@ def deep_analyze(sub,call,force=False,*,teacher_only=False):
         rec.update(status='completed',needs_review=bool(rec['conflicts']) or rec['analysis']['overall']=='insufficient_evidence')
     except (RuntimeError,ValueError) as exc:
         rec.update(status='failed',error=str(exc),error_type=type(exc).__name__,conflicts=[])
+        if getattr(exc,'compact_retry',False):rec['compact_retry']=True
     sub['analyses'].append(rec)
     return rec
 
@@ -293,7 +354,7 @@ def effective(w,sub):
                     'first_error_step':review['first_error_step'],'source_id':review['id']}
         return {'verdict':'uncertain','confirmed':False,'basis':'教师驳回或暂无法判断','source_id':review['id'],'first_error_step':None}
     verdict=q['verdict'] if q else {'appears_correct':'correct','error_found':'incorrect','insufficient_evidence':'uncertain'}.get((a or {}).get('analysis',{}).get('overall'),'uncertain')
-    if sub.get('quick_checks') and sub['quick_checks'][-1]['status']=='failed':
+    if (current_records(sub,'quick_checks') or [{}])[-1].get('status')=='failed':
         verdict='uncertain'
     if a and current:
         av={'appears_correct':'correct','error_found':'incorrect','insufficient_evidence':'uncertain'}[a['analysis']['overall']]
@@ -343,17 +404,114 @@ def create_batch(w,name,rows,source='image_confirmed',*,grading_policy=None,mate
     c.commit(w,'batch-'+batch['id'],lambda draft:(draft['submissions'].extend(subs),draft['batches'].append(batch)))
     return next(b for b in w['batches'] if b['id']==batch['id'])
 
+def reference_catalog(w,batch):
+    records=batch_submissions(w,batch['id'])
+    return answer_keys.catalog(batch,records)
+
+
+def save_references(w,batch_id,changes,expected,*,prepare=None,persist=None):
+    """Update only the selected questions, under the same lease as grading."""
+    with batch_lease(w['id'],batch_id):
+        if prepare is not None:w=prepare()
+        batch=next(b for b in w['batches'] if b['id']==batch_id)
+        current=batch.get('answer_keys',{})
+        if digest(current)!=expected:
+            raise ValueError('参考答案已在另一窗口更新，请刷新后重新核对。')
+        groups,members=reference_catalog(w,batch)
+        updates={}
+        for key,(answer,rubric) in changes.items():
+            if key not in groups:
+                raise ValueError('题目已变更，请刷新后核对参考答案。')
+            entry=current.get(key,{})
+            old=entry.get('confirmed')
+            draft=entry.get('draft')
+            if not answer and not rubric:
+                if old:
+                    raise ValueError('清空参考答案前请重新填写有效答案。')
+                continue
+            answer,rubric=answer_keys.validated(groups[key],answer,rubric)
+            if old and (answer,rubric)==(old['answer'],old['rubric']):
+                continue
+            source='ai_confirmed' if draft and (answer,rubric)==(draft['answer'],draft['rubric']) else 'teacher'
+            if len(entry.get('history',[]))>=30:
+                raise ValueError('此题参考答案已达到修订上限。')
+            version=answer_keys.new_version(answer,rubric,source)
+            updates[key]=dict(entry,confirmed=version,history=entry.get('history',[])+([old] if old else []))
+        if not updates:return 0
+        def apply(data):
+            saved=next(b for b in data['batches'] if b['id']==batch_id)
+            saved.setdefault('answer_keys',{}).update(updates)
+            affected={}
+            for row in data['submissions']:
+                update=updates.get(members.get(row['id']))
+                if update:
+                    state=effective(data,row)
+                    review=c.latest_review(data,row['id'])
+                    if review and review.get('manual_grade') and state['confirmed']:
+                        continue
+                    row['reference_revision']=update['confirmed']['id']
+                    affected[row['id']]=state['source_id']
+            for task in data['tasks']:
+                if task['submission_id'] in affected:
+                    task['status']='needs_recheck'
+            for entry in data['notebook']:
+                sid=entry['submission_id']
+                if affected.get(sid) and entry.get('source_id')==affected[sid]:
+                    data['book_events'].append({'id':c.uid(),'entry_id':entry['id'],'action':'reference_revised',
+                                                'created_at':c.now(),'previous':deepcopy(entry)})
+                    entry.update(active_error=False,source_id=None,updated_at=c.now(),
+                                 correct_answer='参考答案已更新，等待本题重新批改。',reference_steps=[],supplements=[],
+                                 uncertainties=[],reference_tool={'status':'not_applicable'})
+                    entry.pop('sync_fingerprint',None)
+        c.commit(w,'references-'+c.uid(),apply)
+        if persist is not None:persist()
+        return len(updates)
+
+
+def generate_references(w,batch_id,call,progress=None,*,prepare=None,persist=None):
+    with batch_lease(w['id'],batch_id):
+        if prepare is not None:w=prepare()
+        batch=next(b for b in w['batches'] if b['id']==batch_id)
+        groups,_=reference_catalog(w,batch)
+        keys=batch.setdefault('answer_keys',{})
+        remaining=[(key,sub) for key,sub in groups.items()
+                   if not (keys.get(key,{}).get('confirmed') or keys.get(key,{}).get('draft'))
+                   and not unreadable(sub)]
+        failed=0
+        for i,(key,sub) in enumerate(remaining,1):
+            if progress:progress(i,len(remaining))
+            entry=keys.setdefault(key,{})
+            try:
+                answer,rubric=answer_keys.generate(sub,call,compact_only=entry.get('compact_retry',False))
+            except RuntimeError as exc:
+                if getattr(exc,'compact_retry',False):entry['compact_retry']=True
+                if persist is not None:persist()
+                return str(exc)
+            except ValueError as exc:
+                entry['error']=str(exc)
+                if getattr(exc,'compact_retry',False):entry['compact_retry']=True
+                failed+=1
+            else:
+                entry['draft']=answer_keys.new_version(answer,rubric,'ai_draft')
+                entry.pop('error',None)
+                entry.pop('compact_retry',None)
+            if persist is not None:persist()
+        return f'本轮有 {failed} 道题未生成参考答案。可查看原因或手动填写。' if failed else ''
+
+
 def batch_execution(w,batch_id):
     """Derive completion from current stage records, never from the old label alone."""
     batch=next(b for b in w['batches'] if b['id']==batch_id)
     subs={s['id']:s for s in w['submissions']}
     out=dict(total=len(batch['submission_ids']),complete=0,quick_completed=0,
-             deep_required=0,deep_completed=0,failed=0,blocked=0)
+             deep_required=0,deep_completed=0,failed=0,blocked=0,needs_transcription=0)
     attempted=False
     for sid in batch['submission_ids']:
         sub=subs.get(sid)
         if sub is None:continue
-        q=next((r for r in reversed(sub.get('quick_checks',[]))
+        if sub.get('grading_policy')==CLASSROOM_POLICY and unreadable(sub) and not effective(w,sub)['confirmed']:
+            out['needs_transcription']+=1
+        q=next((r for r in reversed(current_records(sub,'quick_checks'))
                 if r.get('fingerprint')==sub['fingerprint']),None)
         attempted=attempted or q is not None
         if not q or q.get('status')!='completed':
@@ -370,7 +528,7 @@ def batch_execution(w,batch_id):
         if sub.get('grading_policy')==CLASSROOM_POLICY and effective(w,sub)['confirmed']:
             out['complete']+=1;continue
         out['deep_required']+=1
-        a=next((r for r in reversed(sub.get('analyses',[]))
+        a=next((r for r in reversed(current_records(sub,'analyses'))
                 if r.get('engine_version')==DEEP_VERSION and r.get('quick_id')==q['id']
                 and r.get('fingerprint')==sub['fingerprint']),None)
         if a and a.get('status')=='completed' and not math_tools.reference_conflicts(a.get('correction',{}).get('reference_tool',{})) and not (a.get('teacher_only') and a.get('needs_review')):
@@ -378,6 +536,7 @@ def batch_execution(w,batch_id):
         elif a and a.get('status')=='failed':
             out['blocked' if a.get('error_type')=='UsageLimitError' else 'failed']+=1
     out['remaining']=out['total']-out['complete']
+    out['retryable_remaining']=max(0,out['remaining']-out['needs_transcription'])
     if out['total'] and not out['remaining']:state='processed'
     elif batch.get('status')=='paused':state='paused'
     elif out['quick_completed']:state='partial'
@@ -410,21 +569,71 @@ def _run_batch(w,batch_id,call,progress=None,force=False,*,submission_ids=None):
     batch['status']='running'
     batch.pop('pause_reason',None)
     stopped=False
+    service_failures=0
+    keys={entry['confirmed']['id']:entry['confirmed'] for entry in batch.get('answer_keys',{}).values()
+          if entry.get('confirmed')}
+    subs={sub['id']:sub for sub in w['submissions']}
+    if not force and submission_ids is None:
+        def had_failure(sid):
+            sub=subs[sid]
+            check=(current_records(sub,'quick_checks') or [{}])[-1]
+            return (sub.get('grading_policy')==CLASSROOM_POLICY and check.get('status')=='failed'
+                    and check.get('error_type') not in ('UsageLimitError','UnreadableWork'))
+        def priority(sid):
+            sub=subs[sid]
+            reference=keys.get(sub.get('reference_revision'))
+            local=sub.get('grading_policy')==CLASSROOM_POLICY and (is_blank(sub) or reference_match(sub,reference) is not None)
+            return not local,had_failure(sid)
+        ids.sort(key=priority)
+    objective_results={}
+    def objective_key(sub):
+        if (sub.get('grading_policy')==CLASSROOM_POLICY and sub.get('question_type') in ('选择题','填空题')
+            and sub['answer'] and not unreadable(sub) and not is_blank(sub)):
+            return (sub['question'],sub['answer'],tuple(sub['steps']),sub['question_type'],sub['topic'],
+                    sub['task_type'],sub['tool_expression'],sub.get('reference_revision'))
+        return None
+    if not force and submission_ids is None:
+        for sid in ids:
+            sub=subs[sid]
+            key=objective_key(sub)
+            raw=(current_records(sub,'quick_checks') or [{}])[-1]
+            if key and raw.get('status')=='completed' and raw.get('fingerprint')==sub['fingerprint'] and not effective(w,sub)['confirmed']:
+                result=guarded_quick(raw)
+                if result['verdict'] in ('correct','incorrect'):objective_results.setdefault(key,result)
     for stage in ('quick','deep'):
         for i,sid in enumerate(ids):
-            sub=next(s for s in w['submissions'] if s['id']==sid)
+            sub=subs[sid]
             if sub.get('grading_policy')==CLASSROOM_POLICY and effective(w,sub)['confirmed'] and not force:
                 continue
-            q=guarded_quick(sub['quick_checks'][-1]) if sub.get('quick_checks') else None
+            checks=current_records(sub,'quick_checks')
+            q=guarded_quick(checks[-1]) if checks else None
+            reference=keys.get(sub.get('reference_revision'))
+            before=q if stage=='quick' else (current_records(sub,'analyses') or [None])[-1]
             if stage=='deep' and not needs_deep(sub,q):
                 continue
             if stage=='quick':
-                rec=quick_check(sub,call,force)
+                if (not force and sub.get('grading_policy')==CLASSROOM_POLICY and unreadable(sub)
+                    and q and q.get('error_type')=='UnreadableWork' and q.get('fingerprint')==sub['fingerprint']):
+                    continue
+                key=objective_key(sub)
+                previous=objective_results.get(key)
+                if previous and not (q and q.get('status')=='completed' and q.get('fingerprint')==sub['fingerprint']):
+                    rec=dict(deepcopy(previous),id=c.uid(),created_at=c.now(),fingerprint=sub['fingerprint'],
+                             reused_from=previous['id'])
+                    sub['quick_checks'].append(rec)
+                else:
+                    rec=quick_check(sub,call,force,reference=reference)
+                if key and not force and submission_ids is None and rec.get('verdict') in ('correct','incorrect'):
+                    objective_results.setdefault(key,rec)
             else:
-                rec=deep_analyze(sub,call,force,teacher_only=sub.get('grading_policy')==CLASSROOM_POLICY)
-            if progress:
-                progress(stage,i+1,len(ids))
-            if rec.get('error_type')=='UsageLimitError':
+                rec=deep_analyze(sub,call,force,teacher_only=sub.get('grading_policy')==CLASSROOM_POLICY,reference=reference)
+            if rec.get('id')!=(before or {}).get('id'):
+                if rec.get('error_type')=='ServiceUnavailable':
+                    service_failures+=1
+                elif rec.get('status')=='completed':
+                    service_failures=0
+                if progress:progress(stage,i+1,len(ids))
+            if rec.get('error_type')=='UsageLimitError' or service_failures>=2:
                 stopped=True;batch['pause_reason']=rec.get('error','请求受到限制，请稍后继续。');break
         if stopped:break
     batch=next(b for b in w['batches'] if b['id']==batch_id)
@@ -436,7 +645,7 @@ def _run_batch(w,batch_id,call,progress=None,force=False,*,submission_ids=None):
 
 
 def regrade_transcription(w,batch_id,submission_id,expected_fingerprint,steps,answer,call,
-                          *,prepare=None,persist=None):
+                          *,question=None,prepare=None,persist=None):
     """Revise only the OCR text, then grade only the selected submission."""
     with batch_lease(w['id'],batch_id):
         if prepare is not None:
@@ -444,10 +653,15 @@ def regrade_transcription(w,batch_id,submission_id,expected_fingerprint,steps,an
         sub=next((s for s in w['submissions'] if s['id']==submission_id and s.get('batch_id')==batch_id),None)
         if not sub or not sub.get('image_ref') or sub['fingerprint']!=expected_fingerprint:
             raise ValueError('作答已变更或缺少原图，请刷新后再校正。')
-        normalized=e.normalize_submission(dict(sub,steps=steps,answer=answer),allow_unanswered=True)
-        if (normalized['steps'],normalized['answer'])==(sub['steps'],sub['answer']):
+        changes=dict(steps=steps,answer=answer)
+        if question is not None:changes['question']=question
+        normalized=e.normalize_submission(dict(sub,**changes),allow_unanswered=True)
+        fields=('question','steps','answer')
+        if all(normalized[key]==sub[key] for key in fields):
             raise ValueError('转写内容没有变更。')
         revision_id=c.uid()
+        batch=next(b for b in w['batches'] if b['id']==batch_id)
+        _,old_members=reference_catalog(w,batch) if sub.get('reference_revision') else ({},{})
 
         def apply(draft):
             row=next(s for s in draft['submissions'] if s['id']==submission_id)
@@ -455,10 +669,17 @@ def regrade_transcription(w,batch_id,submission_id,expected_fingerprint,steps,an
             if len(history)>=20:
                 raise ValueError('本题已达到转写修订上限。')
             history.append({'id':revision_id,'created_at':c.now(),
-                            **{k:deepcopy(row[k]) for k in ('steps','answer','fingerprint','quick_checks','analyses','solutions') if k in row}})
-            row.update(steps=normalized['steps'],answer=normalized['answer'],
+                            **{k:deepcopy(row[k]) for k in (*fields,'submission_status','fingerprint','quick_checks','analyses','solutions') if k in row}})
+            row.update(question=normalized['question'],question_fingerprint=normalized['question_fingerprint'],
+                       steps=normalized['steps'],answer=normalized['answer'],
                        fingerprint=digest([normalized['fingerprint'],revision_id]),
                        quick_checks=[],analyses=[],solutions=[])
+            if row.get('reference_revision') and row['question']!=history[-1]['question']:
+                _,new_members=reference_catalog(draft,batch)
+                if old_members.get(submission_id)!=new_members.get(submission_id):
+                    row.pop('reference_revision',None)
+            if row.get('submission_status')=='unreadable':
+                row['submission_status']='submitted'
             for task in draft['tasks']:
                 if task['submission_id']==submission_id:
                     task['status']='needs_recheck'
@@ -472,7 +693,7 @@ def regrade_transcription(w,batch_id,submission_id,expected_fingerprint,steps,an
                              uncertainties=[],knowledge_points=[],reference_tool={'status':'not_applicable'},
                              ai_category=UNKNOWN,ai_category_basis='旧判断依据的转写已修订。',
                              category_confirmed=False,
-                             original_steps=deepcopy(row['steps']),original_answer=row['answer'])
+                             question=row['question'],original_steps=deepcopy(row['steps']),original_answer=row['answer'])
                 entry.pop('sync_fingerprint',None)
                 entry['updated_at']=c.now()
 
@@ -594,7 +815,8 @@ def sync_notebook(w,submission_id,manual=False,chosen_category=None):
          'question_type':sub.get('question_type','未分类'),'question_id':item_key(sub),
          'parent_question_no':sub.get('parent_question_no',''),'subquestion_no':sub.get('subquestion_no',''),
          'question':sub['question'],'image_ref':sub.get('image_ref'),'first_error_step':state['first_error_step'],
-         'correct_answer':(correction or {}).get('answer','尚未生成可靠参考解，可在辅导中请求完整解答。'),
+         'correct_answer':(correction or {}).get('answer') or (q or {}).get('reference_answer')
+                          or '尚未生成可靠参考解，可在辅导中请求完整解答。',
          'reference_steps':deepcopy((correction or {}).get('steps',[])),
          'supplements':deepcopy((correction or {}).get('supplements',[])),
          'uncertainties':deepcopy((correction or {}).get('uncertainties',[])),

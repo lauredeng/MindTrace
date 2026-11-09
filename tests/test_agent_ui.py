@@ -1,16 +1,16 @@
 """Agent UI interactions use explicit offline decisions and real local mathematics."""
 import json
 from core import ai,product as p,agent as a
-from test_product_ui import app,click
+from test_product_ui import app,click,choose_student
 from test_agent import decision
 from test_education import CASES
 
 
 def test_deep_tutoring_selects_tools_keeps_sources_and_can_switch_to_direct(app,monkeypatch):
  at,calls=app;click(at,'进入教师工作台')
- w=at.session_state['studio_workspace'];p.create_batch(w,'受控辅导界面',[CASES[10]])
- at.run();click(at,'开始批改并分析错题')
- click(at,'返回产品首页');click(at,'进入学生学习中心')
+ w=at.session_state['studio_workspace'];p.create_batch(w,'受控辅导界面',[dict(CASES[10],student_id='001')])
+ at.run();click(at,'开始批改')
+ click(at,'返回产品首页');click(at,'进入学生学习中心');choose_student(at,'001')
  sub=at.session_state['studio_workspace']['submissions'][0]
  normal=ai.completion;decisions=[]
  def model(messages,**kw):
@@ -38,9 +38,9 @@ def test_deep_tutoring_selects_tools_keeps_sources_and_can_switch_to_direct(app,
 
 def test_agent_request_for_teacher_appears_in_existing_feedback(app,monkeypatch):
  at,calls=app;click(at,'进入教师工作台')
- w=at.session_state['studio_workspace'];p.create_batch(w,'需要复核',[CASES[10]])
- at.run();click(at,'开始批改并分析错题')
- click(at,'返回产品首页');click(at,'进入学生学习中心')
+ w=at.session_state['studio_workspace'];p.create_batch(w,'需要复核',[dict(CASES[10],student_id='001')])
+ at.run();click(at,'开始批改')
+ click(at,'返回产品首页');click(at,'进入学生学习中心');choose_student(at,'001')
  sub=at.session_state['studio_workspace']['submissions'][0]
  monkeypatch.setattr(ai,'completion',lambda *args,**kw:decision('request_teacher','请教师核对第2步和原题条件。'))
  at.session_state['tutoring_mode_'+sub['id']]='深度辅导';at.run();click(at,'开始深度辅导')

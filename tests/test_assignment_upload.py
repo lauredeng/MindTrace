@@ -204,7 +204,7 @@ def test_malformed_json_retries_only_the_failed_region(monkeypatch,failures):
     if failures==2:
         assert '已保留成功的部分' in state['error']
         uploads.process_pages(docs,['8'],states,model,mode='pdf',limit_bytes=SIZE)
-        assert calls==['full','top','bottom','strict','bottom']
+        assert calls==['full','top','bottom','strict','strict']
     assert not state['error']
     _,rows=uploads.assemble_materials(docs,['8'],states,mode='pdf')
     assert rows[0]['answer']=='2' and rows[0]['source_pages']==[1]
@@ -252,7 +252,7 @@ def test_shared_stem_at_page_end_is_used_for_next_page_subquestions(monkeypatch)
         return dict(question_no=number,question=content,question_type='解答题',steps=[],answer_status='not_on_page',**fields)
     pages=iter([
         {'records':[stem('17','公共条件：直线 AB 垂直平面 P。',stem_status='shared')]},
-        {'records':[stem('（1）','证明 AC 垂直 AB。'),stem('（2）','求角度。')]},
+        {'records':[stem('（1）','证明 AC 垂直 AB。',stem_status='subquestion'),stem('（2）','求角度。',stem_status='subquestion')]},
         {'records':[],'answers':[{'question_no':'17.1','steps':['因为…'], 'answer_status':'answered'}]},
     ])
     states={}
@@ -261,6 +261,7 @@ def test_shared_stem_at_page_end_is_used_for_next_page_subquestions(monkeypatch)
     assert [row['question_no'] for row in rows]==['17(1)','17(2)']
     assert all('公共条件' in row['question'] for row in rows)
     assert rows[0]['source_pages']==[1,2,3] and rows[1]['source_pages']==[1,2]
+    assert all(r.get('submission_status')!='unreadable' for r in rows)
     assert product.is_blank(education.normalize_submission(rows[1],allow_unanswered=True))
 
 
@@ -289,3 +290,60 @@ def test_identical_pdf_question_pages_are_reused_without_sharing_student_answers
     state_b['fresh_pages']={0}
     uploads.process_pages(docs,['9'],states,model,mode='pdf',limit_bytes=SIZE,budget=1)
     assert len(calls)==4 and not state_b['drafts'][0].get('reused_question_page')
+def test_filename_student_numbers_join_two_batches_in_demo_classroom(monkeypatch,tmp_path):
+    roster=uploads.parse_roster('００１\n002')
+    docs=uploads.upload_documents([pdf_file(1,1,'001.pdf'),pdf_file(2,1,'002.pdf')],'pdf',SIZE)
+    monkeypatch.setattr(uploads,'render_document',lambda doc,*_: [photo_files(1)[0].getvalue()])
+    states={}
+    replies=iter([fixture_page(question='第一份作业：求圆的半径。'),fixture_page(question='另一名学生的题目。')])
+    uploads.process_pages(docs,list(docs),states,lambda *_a,**_k:next(replies),mode='pdf',limit_bytes=SIZE)
+    materials,rows=uploads.assemble_materials(docs,list(docs),states,mode='pdf',roster=roster)
+    assert [m['student_id'] for m in materials]==['001','002']
+    assert [m['identity_status'] for m in materials]==['filename','filename']
+    code=collaboration.create('学号演示课堂',tmp_path,creator_id='roster-demo-test',number_demo=True)
+    base=collaboration.load(code,tmp_path)
+    w=deepcopy(base)
+    w['student_roster']=roster
+    product.create_batch(w,'第一次作业',rows,materials=materials,grading_policy=product.CLASSROOM_POLICY)
+    second=uploads.upload_documents([pdf_file(3,1,'001.pdf')],'pdf',SIZE)
+    second_states={}
+    uploads.process_pages(second,list(second),second_states,lambda *_a,**_k:fixture_page(
+        question='第二份作业：求圆的半径。'),mode='pdf',limit_bytes=SIZE)
+    materials,rows=uploads.assemble_materials(second,list(second),second_states,mode='pdf',roster=roster)
+    product.create_batch(w,'第二次作业',rows,materials=materials,grading_policy=product.CLASSROOM_POLICY)
+    collaboration.save(code,base,w,tmp_path)
+    class_id=code.split('.')[0]
+    access=collaboration.demo_code(class_id,'001')
+    view=collaboration.load(access,tmp_path)
+    assert 'student_roster' not in view
+    assert {s['student_id'] for s in view['submissions']}=={'001'}
+    assert [batch['name'] for batch in view['batches']]==['第一次作业','第二次作业']
+    with pytest.raises(ValueError):
+        collaboration.load(collaboration.demo_code(class_id,'003'),tmp_path)
+    other=collaboration.load(collaboration.demo_code(class_id,'002'),tmp_path)
+    assert {s['student_id'] for s in other['submissions']}=={'002'}
+    assert [b['name'] for b in other['batches']]==['第一次作业']
+    updated=deepcopy(view)
+    updated['submissions'].append(education.normalize_submission(
+        {'student_id':'001','question':'自主学习题','answer':'2'},'self_study'))
+    collaboration.save(access,view,updated,tmp_path)
+    assert collaboration.load(code,tmp_path)['submissions'][-1]['source']=='self_study'
+    assert collaboration.load(code,tmp_path)['student_roster']==roster
+    private=collaboration.create('普通课堂',tmp_path,creator_id='roster-private-test')
+    with pytest.raises(ValueError):
+        collaboration.load(collaboration.demo_code(private.split('.')[0],'001'),tmp_path)
+
+
+def test_student_number_assignment_flags_duplicates_and_allows_manual_correction():
+    docs={'a':{'name':'001.pdf'},'b':{'name':'００１.PDF'},'c':{'name':'012.pdf'},'d':{'name':'student_A.pdf'}}
+    order=list(docs)
+    with pytest.raises(ValueError):
+        uploads.parse_roster('001\n００１')
+    matches,errors=uploads.identify_materials(docs,order,mode='pdf',roster=['001','002'])
+    assert matches=={'a':('001','filename'),'b':('001','filename')}
+    assert set(errors)=={'a','b','c'}
+    matches,errors=uploads.identify_materials(docs,order,mode='pdf',roster=['001','002'],
+                                               overrides={'b':'002','c':'匿名'})
+    assert not errors and matches=={'a':('001','filename'),'b':('002','manual')}
+    photos,errors=uploads.identify_materials(docs,['c','d'],mode='photos',overrides={'c':'001'})
+    assert photos=={'c':('001','manual')} and not errors

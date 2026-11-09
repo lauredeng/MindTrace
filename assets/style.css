@@ -167,7 +167,7 @@ h1 {font-size:1.75rem!important;}
 .sidebar-space{height:40px;}.topline{margin-bottom:22px;border-bottom-color:#edf0f7;font-size:11px;}
 .product-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:22px;margin:15px 0 22px;}
 .product-heading h1{font-size:27px!important;font-weight:700!important;line-height:1.45!important;letter-spacing:-.6px;margin:7px 0 5px;padding:0!important;}
-.product-heading p{color:#77829a;font-size:13px;line-height:1.9;margin:0;max-width:670px;}
+.product-heading p{color:#53627c;font-size:13px;line-height:1.9;margin:0;max-width:670px;}
 .product-kicker{color:#8291b2;font-size:10px;letter-spacing:1px;}.product-tag{padding:6px 11px;border:1px solid #e1e8fb;border-radius:16px;background:#f5f7ff;color:#5f73bc;font-size:11px;white-space:nowrap;margin-top:21px;}
 .academic-metric{min-height:150px;border:1px solid #e8edf7;background:#fff;border-radius:18px;padding:22px 24px;margin:0 0 14px;}
 .metric-top{display:flex;align-items:center;gap:11px;color:#7a859f;font-size:12px;}
@@ -238,17 +238,68 @@ h1 {font-size:1.75rem!important;}
 [class*="st-key-v11_surface_assignment_upload_"] [data-testid="stFileChipDeleteBtn"] button:hover{background:#e8edfc;color:#3158de}
 [class*="st-key-v11_surface_assignment_upload_"] button[aria-label="Add files"]{min-width:38px;min-height:38px}
 
-@media(max-width:700px){.st-key-home_select_teacher button,.st-key-home_select_student button{height:auto;min-height:260px}}
-
-/* One continuous role card, with a quiet integrated entry row. */
-:is(.st-key-v11_surface_home_teacher,.st-key-v11_surface_home_student){--role-ink:#283654;--role-line:#e7ecf8;padding:0!important;overflow:hidden;background:#f8faff!important;border:1px solid #e5ebf7!important;transition:transform .22s ease,box-shadow .22s ease,border-color .22s ease;transform-origin:center}
-:is(.st-key-v11_surface_home_teacher,.st-key-v11_surface_home_student):has([class*="st-key-home_select_"] button[kind="primary"]){--role-ink:#fff;--role-line:#ffffff38;background:linear-gradient(115deg,#355fdf,#628fe6)!important;border-color:#517de5!important}
+/* The introduction and two role actions share a clear reading edge. */
+.landing-classic h1{letter-spacing:.025em;margin-bottom:7px}
+.landing-classic cite{display:block;margin:0 0 14px;color:#596982;font-size:12px;font-style:normal}
+.landing-classic>p{color:#53627c;line-height:1.8;max-width:46rem}
+:is(.st-key-v11_surface_home_teacher,.st-key-v11_surface_home_student){
+ --role-ink:#243650;--role-muted:#536681;--role-accent:#3158c7;--role-line:#e7edf7;--role-hover:#edf3ff;
+ padding:0!important;overflow:hidden;background:#fff!important;border:1px solid #e0e8f5!important;
+ border-radius:18px!important;
+ transition:transform .46s cubic-bezier(.22,.8,.27,1.25),box-shadow .32s ease,border-color .24s ease;
+}
+:is(.st-key-v11_surface_home_teacher,.st-key-v11_surface_home_student):has([class*="st-key-home_select_"] button[kind="primary"]){
+ --role-ink:#fff;--role-muted:#eef3ff;--role-accent:#fff;--role-line:#ffffff3d;--role-hover:#ffffff1a;
+ background:
+  radial-gradient(circle at 95% -9%,#d9e7ff24 0 57px,#dce7ff13 58px 96px,transparent 97px),
+  radial-gradient(ellipse at 100% 100%,#79a4ff59 0,transparent 70%),
+  linear-gradient(118deg,#304cbd 0%,#4568cc 58%,#5176d5 100%)!important;
+ border-color:#5577d9!important;box-shadow:0 13px 27px #3158c735;
+}
 :is(.st-key-v11_surface_home_teacher,.st-key-v11_surface_home_student)>.stVerticalBlock{gap:0!important}
-:is(.st-key-v11_surface_home_teacher,.st-key-v11_surface_home_student) .stButton button{background:transparent!important;border:0!important;box-shadow:none!important;color:var(--role-ink)!important;border-radius:0!important;filter:none!important}
-:is(.st-key-v11_surface_home_teacher,.st-key-v11_surface_home_student) .stButton button p{color:var(--role-ink)!important}
-:is(.st-key-home_select_teacher,.st-key-home_select_student) button{padding:30px 28px!important;}
-:is(.st-key-home_enter_teacher,.st-key-home_enter_student) button{border-top:1px solid var(--role-line)!important;padding:16px 28px!important;min-height:56px;justify-content:space-between!important;text-align:left}
-:is(.st-key-home_enter_teacher,.st-key-home_enter_student) button:after{content:"→" / "";font-size:22px;margin-left:auto}
-:is(.st-key-home_enter_teacher,.st-key-home_enter_student) button:hover{background:#ffffff19!important}
-@media(hover:hover) and (prefers-reduced-motion:no-preference){:is(.st-key-v11_surface_home_teacher,.st-key-v11_surface_home_student):hover{transform:translateY(-4px) scale(1.015);box-shadow:0 14px 30px #365dde24!important;border-color:#9aaff1!important}}
-@media(prefers-reduced-motion:reduce){:is(.st-key-v11_surface_home_teacher,.st-key-v11_surface_home_student){transition:none}}
+:is(.st-key-v11_surface_home_teacher,.st-key-v11_surface_home_student) .stButton button{
+ background:transparent!important;border:0!important;box-shadow:none!important;color:var(--role-ink)!important;
+ border-radius:0!important;filter:none!important;
+}
+:is(.st-key-home_select_teacher,.st-key-home_select_student) button{
+ height:auto;min-height:163px;padding:24px 24px!important;justify-content:flex-start!important;
+}
+:is(.st-key-home_select_teacher,.st-key-home_select_student) button::after{display:none!important}
+:is(.st-key-home_select_teacher,.st-key-home_select_student,.st-key-home_enter_teacher,.st-key-home_enter_student) button>div{
+ flex:1;min-width:0;width:100%;justify-content:flex-start!important;text-align:left;
+}
+:is(.st-key-home_select_teacher,.st-key-home_select_student) button p{
+ color:var(--role-ink)!important;font-size:14px!important;line-height:1.45!important;margin:0 0 6px!important;
+}
+:is(.st-key-home_select_teacher,.st-key-home_select_student) button p:first-child{
+ color:var(--role-muted)!important;font-size:12px!important;font-weight:600;letter-spacing:.02em;
+}
+:is(.st-key-home_select_teacher,.st-key-home_select_student) button p:last-child{
+ color:var(--role-muted)!important;margin-bottom:0!important;
+}
+:is(.st-key-home_select_teacher,.st-key-home_select_student) button strong{font-size:20px!important}
+:is(.st-key-v11_surface_home_teacher,.st-key-v11_surface_home_student) :is(.st-key-home_enter_teacher,.st-key-home_enter_student) button{
+ border-top:1px solid var(--role-line)!important;padding:11px 24px!important;min-height:48px;
+ justify-content:space-between!important;text-align:left;color:var(--role-accent)!important;
+}
+:is(.st-key-home_enter_teacher,.st-key-home_enter_student) button::after{content:"→" / "";font-size:17px}
+:is(.st-key-home_enter_teacher,.st-key-home_enter_student) button p{
+ color:var(--role-accent)!important;font-weight:650;text-align:left!important;
+}
+:is(.st-key-home_enter_teacher,.st-key-home_enter_student) button:hover{background:var(--role-hover)!important}
+@media(max-width:700px){
+ .st-key-home_role_grid [data-testid="stHorizontalBlock"]{flex-wrap:wrap!important}
+ .st-key-home_role_grid [data-testid="stColumn"]{min-width:100%!important}
+ :is(.st-key-home_select_teacher,.st-key-home_select_student) button{min-height:134px;padding:19px 19px!important}
+}
+@media(min-width:701px) and (prefers-reduced-motion:no-preference){
+ :is(.st-key-v11_surface_home_teacher,.st-key-v11_surface_home_student):has([class*="st-key-home_select_"] button[kind="primary"]){
+  transform:translateY(-3px) scale(1.032);z-index:1;
+ }
+}
+@media(prefers-reduced-motion:reduce){
+ :is(.st-key-v11_surface_home_teacher,.st-key-v11_surface_home_student){transition:none}
+}
+
+.st-key-student_composer [data-testid="stChatInput"]{margin-top:5px}
+.st-key-student_composer [data-testid="stChatInput"] textarea{min-height:58px}

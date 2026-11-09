@@ -81,6 +81,35 @@ def _validate_materials(batch, submissions):
         raise ValueError('存在未关联到题目的学生作业。')
 
 
+def _validate_answer_keys(keys):
+    if not isinstance(keys,dict) or len(keys)>BATCH_LIMIT:
+        raise ValueError('作业参考答案格式或数量无效。')
+    confirmed_ids=set()
+    for key,entry in keys.items():
+        if not isinstance(key,str) or not re.fullmatch(r'[a-f0-9]{64}',key) or not isinstance(entry,dict):
+            raise ValueError('作业参考答案关联无效。')
+        history=entry.get('history',[])
+        _records(history,'参考答案修订',30)
+        versions=[*history]
+        if 'confirmed' in entry:versions.append(entry['confirmed'])
+        if 'draft' in entry:versions.append(entry['draft'])
+        for version in versions:
+            if not isinstance(version,dict) or version.get('source') not in ('teacher','ai_draft','ai_confirmed'):
+                raise ValueError('参考答案来源无效。')
+            _text(version.get('id'),100,'参考答案版本')
+            _text(version.get('answer'),2000,'参考答案')
+            _text(version.get('rubric'),2000,'评分依据',True)
+            _text(version.get('created_at'),100,'参考答案创建时间')
+            if version is entry.get('draft'):
+                if version['source']!='ai_draft':raise ValueError('参考答案草稿状态无效。')
+            else:
+                if version['source']=='ai_draft' or version['id'] in confirmed_ids:
+                    raise ValueError('参考答案确认版本无效。')
+                confirmed_ids.add(version['id'])
+        if 'error' in entry:_text(entry['error'],2000,'参考答案生成状态')
+    return confirmed_ids
+
+
 def validate_links(data):
     """Validate canonical material and ownership; legacy optional fields stay optional."""
     submissions={row['id']:row for row in data['submissions']}
@@ -135,6 +164,11 @@ def validate_links(data):
             raise ValueError('作业批次关联无效。')
         _text(batch.get('name'),100,'作业名称')
         _records(batch.get('questions'),'批次题目',BATCH_LIMIT)
+        if 'answer_keys' in batch:
+            versions=_validate_answer_keys(batch['answer_keys'])
+            if any(submissions[sid].get('reference_revision') not in versions for sid in ids
+                   if submissions[sid].get('reference_revision')):
+                raise ValueError('作答关联的参考答案版本无效。')
         if 'materials' in batch:
             _validate_materials(batch,submissions)
             name=batch['name'].strip().casefold()

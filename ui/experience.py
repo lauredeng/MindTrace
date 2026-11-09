@@ -5,6 +5,7 @@ from collections import Counter
 from html import escape
 import json
 import streamlit as st
+from ui.design import BRAND_TITLE
 from core import education as edu, classroom as store
 from ui.workbench import Runtime, heading, source_panel, status, message
 
@@ -110,7 +111,7 @@ def load_examples(rt):
     st.rerun()
 
 def landing(rt):
-    st.markdown('<div class="landing-intro"><span class="eyebrow">MINDTRACE · 知错 AI</span><h1>看见学习的线索，<br>让每一步进步有迹可循。</h1><p>高中数学学情分析与个性化学习平台</p></div>', unsafe_allow_html=True)
+    st.markdown('<div class="landing-intro"><span class="eyebrow">'+BRAND_TITLE+'</span><h1>看见学习的线索，<br>让每一步进步有迹可循。</h1><p>高中数学学情分析与个性化学习平台</p></div>', unsafe_allow_html=True)
     left,right=st.columns([1.45,1],gap='large')
     with left, surface(key='entry_teacher'):
         card('FOR TEACHERS / 教师工作空间','从一份作业，到下一步教学行动','批量分析作业，发现班级共性与个体重复问题。对照原始证据复核后，为学生安排针对性任务。','accent')
@@ -265,9 +266,9 @@ def student_home(rt):
     ids=sorted({t['student_id'] for t in rt.w['tasks']} | {s['student_id'] for s in rt.w['submissions'] if s.get('source')=='self_study'})
     sid=None
     if ids:
-        current=st.session_state.get('studio_current_student')
-        sid=st.selectbox('我的匿名学习编号',ids,index=ids.index(current) if current in ids else 0,key='home_student')
-        st.session_state['studio_current_student']=sid
+        current=rt.assigned_student or st.session_state.get('studio_legacy_student')
+        sid=st.selectbox('我的匿名学习编号',ids,index=ids.index(current) if current in ids else None,key='home_student')
+        if sid is not None:st.session_state['studio_legacy_student']=sid
     own=[t for t in rt.w['tasks'] if t['student_id']==sid]
     pending=[t for t in own if t['status'] not in ('completed','needs_recheck')]
     left,right=st.columns([1.65,1],gap='large')
@@ -343,8 +344,10 @@ def render(page,root,shared,api_key=None):
         profiles(rt)
     elif page=='高级设置':
         title('设置','工作空间设置','管理数据备份，了解当前工作空间的使用方式。')
-        if st.session_state.get('collab_access'):st.info('当前通过课堂访问码连接；学生学习码仅关联本人的记录。')
-        else:st.info('当前为单机演示，自动关联的学习资料不代表正式身份认证。')
+        if rt.access and rt.access['number_demo']:
+            st.info('当前是按学号进入的演示课堂。请使用虚构学号和作答。')
+        elif rt.access:st.info('当前通过课堂访问码连接；学生学习码仅关联本人的记录。')
+        else:st.info('当前为演示工作区。学生未选择学号时，仅显示本会话的自主学习记录。')
         if st.session_state.get('experience_role')=='教师工作空间':
             for item in store.capacity_status(rt.w):
                 st.warning(f"{item['name']}已使用 {item['count']}/{item['limit']}。请先下载完整备份，再新建课堂继续；不会自动清理历史。")
@@ -369,5 +372,3 @@ def render(page,root,shared,api_key=None):
                     st.download_button('下载工作区备份',dumps(rt.w),'mindtrace_workspace.json','application/json')
                     st.caption('备份包含当前工作区的全部学习记录，请由工作区所有者保管。')
                     st.caption('需要归档时请保留此备份及旧课堂恢复码，再新建课堂。旧课堂数据继续保留；当前不自动拆分或删除历史记录。')
-    st.caption('演示工作空间 · 教师与学生共享任务证据；角色切换不代表身份认证。')
-

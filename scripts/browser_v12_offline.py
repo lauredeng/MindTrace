@@ -41,7 +41,7 @@ with sync_playwright() as p:
     shot('01-recognized-draft')
     page.get_by_text('我已核对原图、学生归属、题目和作答。',exact=True).click();idle()
     click('确认校对并保存材料')
-    click('开始批改并分析错题')
+    click('开始批改')
     shot('02-layered-grading')
     # Review only the selected case, not a forced batch-wide confirmation.
     page.get_by_role('button',name='保存复核并更新统计',exact=True).first.click();idle()

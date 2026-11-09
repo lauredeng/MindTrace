@@ -49,6 +49,19 @@ def test_retry_cannot_escape_daily_limit(monkeypatch):
     assert for_session('test-runtime-block')[-1]['status']=='blocked'
 
 
+def test_larger_grading_budget_passes_transport_but_other_requests_stay_bounded(monkeypatch):
+    import json
+    budgets=[]
+    def respond(request):
+        budgets.append(json.loads(request.content)['max_tokens'])
+        return httpx.Response(200,json=success())
+    transport(monkeypatch,respond)
+    messages=[{'role':'user','content':'fixture'}]
+    assert ai.completion(messages,purpose='error_analysis',max_tokens=6500)=='ok'
+    with pytest.raises(ValueError,match='输出长度'):ai.completion(messages,purpose='ocr',max_tokens=6500)
+    assert budgets==[6500]
+
+
 @pytest.mark.parametrize(('content','valid'),[('```json\n{"records":[]}\n```',True),('{"records":[}',False)])
 def test_ocr_json_accepts_exact_code_fence_and_labels_malformed_payload(monkeypatch,content,valid):
     payload=success()

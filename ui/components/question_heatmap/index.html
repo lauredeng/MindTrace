@@ -40,9 +40,9 @@ function render(){
    const button=document.createElement("button");button.type="button";button.className="cell"+((selected||args.selected)===q.id?" selected":"");button.dataset.qid=q.id;
    const c=color(q.errors,maximum,q.valid);Object.assign(button.style,{background:c.bg,color:c.ink,borderColor:c.border});
    const ratio=q.ratio===null?"暂无有效提交":(q.ratio*100).toFixed(1)+"%";
-   const tip="题号 "+q.label+"｜判错 "+q.errors+" 人｜已判 "+q.valid+" 人｜错误比例 "+ratio+"｜未判定 "+q.pending+"｜留白 "+q.not_submitted+"｜无法识别 "+q.unreadable;
+   const tip="题号 "+q.label+"｜判错 "+q.errors+" 人｜已判 "+q.valid+" 人｜错误比例 "+ratio+"｜待批改 "+q.waiting+"｜批改后未判定 "+(q.pending-q.waiting)+"｜留白 "+q.not_submitted+"｜无法识别 "+q.unreadable;
    button.title=tip;button.setAttribute("aria-label",tip);button.setAttribute("aria-pressed",String((selected||args.selected)===q.id));
-   const number=document.createElement("b");number.textContent=q.label;const count=document.createElement("small");count.textContent=q.valid?q.errors+" 人错误":"未判定";
+   const number=document.createElement("b");number.textContent=q.label;const count=document.createElement("small");count.textContent=q.valid?q.errors+" 人错误":q.waiting===q.pending&&q.waiting>0&&!q.unreadable?"待批改":"未判定";
    button.append(number,count);
    const flagged=q.pending+q.unreadable;
    if(flagged){const flag=document.createElement("span");flag.className="flags";flag.textContent=flagged;button.appendChild(flag);}

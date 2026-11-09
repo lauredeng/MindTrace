@@ -54,7 +54,7 @@ with sync_playwright() as p:
   choose(t,'为哪位学生发放学习码',sid);click(t,'生成学生学习码')
   codes[sid]=t.locator('[data-testid=stSidebar] code').last.text_content().strip()
  panel(t,False)
- click(t,'批改操作');click(t,'开始批改并分析错题')
+ click(t,'开始批改')
  click(t,'确认这份批改');choose(t,'查看学生原始作答','B / Q11');click(t,'确认这份批改')
  checks.append('Teacher uploads actual fixture PNG, confirms OCR draft, grades two source records and reviews both; no preset production OCR')
  shot(t,'01-teacher-reviewed')

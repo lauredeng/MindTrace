@@ -28,6 +28,48 @@ def workspace():
     return w,b,w['submissions'][0]
 
 
+def test_classroom_reuses_only_identical_objective_grading_inputs():
+    w=c.new_workspace()
+    rows=[dict(student_id=s,question='圆的半径是多少？',question_type='填空题',answer=answer)
+          for s,answer in [('A','2'),('B','2'),('C','3')]]
+    batch=p.create_batch(w,'相同选择',rows,grading_policy=p.CLASSROOM_POLICY)
+    calls=[]
+    def model(prompt,user,**kwargs):
+        answer=json.loads(user)['answer'];calls.append(answer)
+        return dict(verdict='correct' if answer=='2' else 'incorrect',process_checked=False,basis='核对答案。')
+    p.run_batch(w,batch['id'],model)
+    first,second,third=[sub['quick_checks'][-1] for sub in w['submissions']]
+    assert calls==['2','3'] and second['reused_from']==first['id']
+    assert second['fingerprint']==w['submissions'][1]['fingerprint'] and second['id']!=first['id']
+    assert third['verdict']=='incorrect' and 'reused_from' not in third
+
+
+def test_classroom_truncation_retries_with_larger_budget_and_can_correct_incomplete_stem():
+    from core.ai import OutputTruncatedError
+    w=c.new_workspace()
+    rows=[dict(student_id='A',question='只识别出部分选项。',question_type='选择题',
+               answer='BA',image_ref='a'*64,submission_status='unreadable')]
+    batch=p.create_batch(w,'选择题校正',rows,grading_policy=p.CLASSROOM_POLICY)
+    sub=w['submissions'][0]
+    attempts=[]
+    def model(prompt,user,**kwargs):
+        attempts.append(kwargs)
+        assert '选项集合' in prompt and json.loads(user)['answer']=='BA'
+        if len(attempts)==1:raise OutputTruncatedError('模拟截断')
+        return dict(verdict='correct',process_checked=False,basis='核对选项集合。')
+    p.run_batch(w,batch['id'],model)
+    assert p.batch_execution(w,batch['id'])['needs_transcription']==1
+    p.run_batch(w,batch['id'],model)
+    assert len(sub['quick_checks'])==1 and not attempts
+    p.regrade_transcription(w,batch['id'],sub['id'],sub['fingerprint'],[],sub['answer'],model,
+                            question='请选择正确的选项。A 正确；B 正确；C 错误；D 错误。')
+    assert [a['max_tokens'] for a in attempts]==[2800,5200]
+    assert all(a['reasoning_effort']=='low' for a in attempts)
+    updated=w['submissions'][0]
+    assert updated['submission_status']=='submitted' and updated['transcription_revisions'][0]['question']==sub['question']
+    assert p.effective(w,updated)['verdict']=='correct'
+
+
 def test_classroom_grades_answers_and_blank_without_review_or_deep_calls():
     from core import presentation as v
     w=c.new_workspace()

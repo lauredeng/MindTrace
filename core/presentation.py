@@ -36,24 +36,64 @@ def record_state(w,sub,*,automatic=False):
         return state['verdict']
     return 'pending'
 
+def waiting_for_grade(sub,state):
+    checks=p.current_records(sub,'quick_checks')
+    return state=='pending' and (not checks and not p.current_records(sub,'analyses')
+                                 or bool(checks and checks[-1].get('error_type')=='UsageLimitError'))
+
+
 def sort_key(item):
     numbers=tuple(int(v) for v in re.findall(r'\d+',item['label']))
     return numbers or (999999,),item['label']
 
+def shared_question_keys(batch, records):
+    """Group OCR variants only when the numbered question has an identical source page."""
+    from core.uploads import question_number
+    sources={m['student_id']:m['pages'] for m in batch.get('materials',[]) if m['kind']=='pdf'}
+    owners={}
+    for student,pages in sources.items():
+        for page in pages:owners.setdefault(page['original_image'],set()).add(student)
+    candidates={}
+    for sub in records:
+        label=question_number(sub)
+        pages=sources.get(sub['student_id'],[])
+        for number in sub.get('source_pages',[]):
+            if label and 1<=number<=len(pages):
+                image=pages[number-1]['original_image']
+                if len(owners[image])>1 and any(question_number(stem)==label for stem in pages[number-1].get('recognized_records',[])):
+                    candidates.setdefault((label,image),[]).append(sub)
+                    break
+    by_question={}
+    for sub in records:by_question.setdefault(p.item_key(sub),[]).append(sub)
+    mapped={}
+    for key,group in candidates.items():
+        question_ids={p.item_key(sub) for sub in group}
+        if len(question_ids)<2:continue
+        members=[sub for qid in question_ids for sub in by_question[qid]]
+        if len(members)!=len({sub['student_id'] for sub in members}) or any(sub['id'] in mapped for sub in members):
+            continue
+        group_id=p.digest(['shared_pdf_question',batch['id'],key])
+        mapped.update((sub['id'],group_id) for sub in members)
+    return mapped
+
+
 def heatmap_rows(w,batch_id,*,automatic=False):
     batch=next(b for b in w['batches'] if b['id']==batch_id)
     subs={s['id']:s for s in w['submissions']}
-    chosen={}
-    for sid in batch['submission_ids']:
-        sub=subs.get(sid)
-        if sub:chosen[(p.item_key(sub),sub['student_id'])]=sub
-    questions={q['id']:q for q in batch['questions']}
+    records=[subs[sid] for sid in batch['submission_ids'] if sid in subs]
+    shared=shared_question_keys(batch,records)
+    chosen={(shared.get(sub['id'],p.item_key(sub)),sub['student_id']):sub for sub in records}
+    used={qid for qid,_ in chosen}
+    replaced={p.item_key(sub) for sub in records if sub['id'] in shared}-used
+    questions={q['id']:q for q in batch['questions'] if q['id'] not in replaced}
     for (qid,_),sub in chosen.items():
         questions.setdefault(qid,dict(sub,id=qid))
     output=[]
     for qid,q in questions.items():
         records=[sub for (key,_),sub in chosen.items() if key==qid]
-        counts=Counter(record_state(w,s,automatic=automatic) for s in records)
+        states=[(s,record_state(w,s,automatic=automatic)) for s in records]
+        counts=Counter(state for _,state in states)
+        waiting=sum(waiting_for_grade(s,state) for s,state in states)
         # A missing record is not invented without an explicit assignment roster.
         absent=0
         if batch.get('roster'):
@@ -64,7 +104,7 @@ def heatmap_rows(w,batch_id,*,automatic=False):
         parent,child,label=hierarchy(q)
         output.append({'id':qid,'label':label,'question':q['question'],'question_type':kind(q),
             'parent':parent,'child':child,'correct':counts['correct'],'errors':errors,
-            'valid':valid,'pending':counts['pending'],'not_submitted':counts['not_submitted']+(0 if automatic else absent),
+            'valid':valid,'pending':counts['pending'],'waiting':waiting,'not_submitted':counts['not_submitted']+(0 if automatic else absent),
             'unreadable':counts['unreadable'],'ratio':errors/valid if valid else None,
             'submission_ids':[s['id'] for s in records]})
     return sorted(output,key=sort_key)

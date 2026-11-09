@@ -2,6 +2,10 @@
 from html import escape
 import streamlit as st
 
+BRAND_NAME = "循理ai"
+BRAND_ENGLISH = "MindTrace"
+BRAND_TITLE = f"{BRAND_ENGLISH}{BRAND_NAME}"
+
 ICONS={
  'people':'<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M16 3a4 4 0 0 1 0 8M22 21v-2a4 4 0 0 0-3-3.87"/><circle cx="9" cy="7" r="4"/>',
  'review':'<path d="M9 5H5v16h14V5h-4M9 3h6v4H9zM8 13h8M8 17h5"/>',

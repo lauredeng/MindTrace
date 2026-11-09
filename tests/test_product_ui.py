@@ -13,6 +13,11 @@ def click(at,label):
     next(b for b in at.button if b.label==label).click().run()
     assert not at.exception
 
+def choose_student(at,number):
+    next(t for t in at.text_input if t.label=='学号').set_value(number)
+    click(at,'按学号查看我的作业')
+
+
 @pytest.fixture
 def app(monkeypatch):
     monkeypatch.setenv('MINDTRACE_ENV','production')
@@ -39,8 +44,8 @@ def test_new_navigation_and_teacher_student_notebook_loop(app):
     at,calls=app
     click(at,'进入教师工作台')
     assert main_labels(at)==['作业批改','班级错误分析','历史记录']
-    w=at.session_state['studio_workspace'];batch=p.create_batch(w,'UI构造批次',[CASES[10]],'constructed_examples')
-    at.run();click(at,'开始批改并分析错题')
+    w=at.session_state['studio_workspace'];batch=p.create_batch(w,'UI构造批次',[dict(CASES[10],student_id='001')],'constructed_examples')
+    at.run();click(at,'开始批改')
     assert calls==['quick_grading','error_analysis']
     assert len(at.session_state['studio_workspace']['notebook'])==1
     route(at,'班级学情')
@@ -49,6 +54,7 @@ def test_new_navigation_and_teacher_student_notebook_loop(app):
     assert any('作答与证据' in m.value for m in at.markdown)
     click(at,'返回产品首页');click(at,'进入学生学习中心')
     assert main_labels(at)==['AI解题与辅导','我的错题本','错因分析']
+    choose_student(at,'001')
     click(at,'获取所选讲解')
     click(at,'请 AI 主动问我一个关键问题')
     next(t for t in at.text_area if t.label=='继续追问 / 回答 AI').set_value('为什么两边都要除以2？')
@@ -82,30 +88,32 @@ def test_no_answer_direct_solution_no_forced_task(app):
     assert len(at.session_state['studio_workspace']['notebook'])==1
     assert at.session_state['studio_workspace']['notebook'][0]['primary_category']=='暂无解题思路'
 
-def test_current_student_is_automatic_and_persists_without_public_id_ui(app):
+def test_guest_does_not_inherit_teacher_submissions_and_number_persists(app):
     at,calls=app;w=at.session_state['studio_workspace']
-    for sid in ('A','B'):
-        w['submissions'].append(e.normalize_submission(dict(CASES[10],student_id=sid)))
-    at.session_state['studio_current_student']='B'
+    p.create_batch(w,'班级作业',[dict(CASES[10],student_id=sid) for sid in ('001','002')])
     click(at,'进入学生学习中心')
-    assert at.session_state['studio_current_student']=='B'
-    at.run()
-    assert not any('编号' in s.label for s in at.selectbox)
-    assert not any(t.label in ('匿名学习编号','新的匿名编号','我的匿名学习编号') for t in at.text_input)
+    guest=at.session_state['studio_current_student']
+    assert guest.startswith('STU-')
+    assert not any(s.label=='当前学习题目' for s in at.selectbox)
+    choose_student(at,'002')
+    assert at.session_state['studio_current_student']=='002'
     route(at,'我的错题本')
-    assert at.session_state['studio_current_student']=='B'
+    assert at.session_state['studio_current_student']=='002'
+    click(at,'退出学号，返回自主学习')
+    assert at.session_state['studio_current_student']==guest
     assert calls==[]
 
 
 def test_notebook_foreign_source_link_is_not_rendered(app):
     at,calls=app;w=at.session_state['studio_workspace']
-    own=e.normalize_submission(dict(CASES[10],student_id='A'))
-    foreign=e.normalize_submission(dict(CASES[10],student_id='B',steps=['FOREIGN_PRIVATE_STEP'],answer='OTHER_PRIVATE_ANSWER'))
+    w['student_roster']=['001','002']
+    own=e.normalize_submission(dict(CASES[10],student_id='001'))
+    foreign=e.normalize_submission(dict(CASES[10],student_id='002',steps=['FOREIGN_PRIVATE_STEP'],answer='OTHER_PRIVATE_ANSWER'))
     w['submissions'].extend([own,foreign])
     item=p.sync_notebook(w,own['id'],True,'暂无解题思路')
     item['source_ids'].append(foreign['id'])
-    at.session_state['studio_current_student']='A'
     click(at,'进入学生学习中心')
+    choose_student(at,'001')
     route(at,'我的错题本')
     assert not at.exception
     assert not any('FOREIGN_PRIVATE_STEP' in str(t.value) or 'OTHER_PRIVATE_ANSWER' in str(t.value) for t in at.text)
@@ -173,7 +181,11 @@ def test_batch_failures_have_truthful_status_visible_retry_and_no_auto_calls(app
     monkeypatch.setattr(ai,'completion',unavailable)
     click(at,'进入教师工作台')
     w=at.session_state['studio_workspace'];b=p.create_batch(w,'故障演示验证',[CASES[10]],'constructed_examples')
-    at.run();click(at,'开始批改并分析错题')
+    at.run()
+    assert any('识别和校对已完成' in info.value for info in at.info)
+    assert not any(header.value=='各题错误人数' for header in at.subheader)
+    assert not attempts
+    click(at,'开始批改')
     assert at.session_state['studio_workspace']['batches'][0]['status']==expected
     assert any(button.label==action and not button.disabled for button in at.button)
     assert any('“—”' in info.value for info in at.info)==(failure!='deep')
@@ -225,7 +237,7 @@ def test_teacher_corrects_image_transcription_and_only_regrades_that_submission(
     monkeypatch.setattr(ai,'completion',grade)
     at.session_state['heatmap_selected_'+batch['id']]=p.item_key(sub)
     at.run()
-    next(widget for widget in at.text_area if widget.label=='作答步骤 · 每行一步').set_value('2*x+6=10\n2*x=4\nx=2')
+    next(widget for widget in at.text_area if widget.label=='作答步骤（每行一步）').set_value('2*x+6=10\n2*x=4\nx=2')
     next(widget for widget in at.text_input if widget.label=='作答的最终答案').set_value('x=2')
     next(widget for widget in at.checkbox if widget.label=='我已对照原图确认转写').check()
     click(at,'保存转写并重判本题')
@@ -236,3 +248,96 @@ def test_teacher_corrects_image_transcription_and_only_regrades_that_submission(
     assert other['quick_checks'][0]['id']==before
     assert p.effective(w,sub)['verdict']=='correct' and not p.effective(w,sub)['confirmed']
     assert not w['notebook'][0]['active_error']
+
+
+def test_notebook_separates_grading_basis_from_unanalysed_error_cause(app):
+    at,calls=app
+    w=at.session_state['studio_workspace']
+    batch=p.create_batch(w,'椭圆练习',[{'student_id':'001','question':'写出所有符合条件的直线。',
+        'question_type':'解答题','question_no':'1','answer':'x=1','steps':['求得 x=1']}],
+        grading_policy=p.CLASSROOM_POLICY)
+    p.run_batch(w,batch['id'],lambda *args,**kwargs:{'verdict':'incorrect','final_answer_status':'incorrect',
+        'basis':'遗漏另一条符合条件的直线。','evidence_id':'ANSWER','first_error_step':None,'process_checked':False})
+    click(at,'进入学生学习中心')
+    choose_student(at,'001')
+    route(at,'我的错题本')
+    assert any(item.value=='错因尚未分析' for item in at.caption)
+    click(at,'查看解析')
+    assert any('批改结果' in item.value and '错误' in item.value for item in at.markdown)
+    assert any('批改依据：遗漏另一条符合条件的直线。' in item.value for item in at.markdown)
+    assert not any('主要错因：'+p.UNKNOWN in item.value for item in at.caption)
+    assert calls==[]
+
+
+def test_result_shortcuts_show_the_same_wrong_and_unreadable_records_as_the_heatmap(app):
+    at,_=app
+    click(at,'进入教师工作台')
+    w=at.session_state['studio_workspace']
+    common={'question':'计算 1+1。','question_no':'11','question_type':'填空题'}
+    batch=p.create_batch(w,'筛选验证',[
+        dict(common,student_id='001',answer=''),
+        dict(common,student_id='002',answer='2'),
+        dict(common,student_id='003',answer='[无法辨认]',submission_status='unreadable'),
+        dict(common,student_id='004',answer='2'),
+    ])
+    correct=w['submissions'][1]
+    p.quick_check(correct,lambda *_args,**_kwargs:{'verdict':'correct','final_answer_status':'correct',
+        'basis':'结果为 2。','evidence_id':'ANSWER','process_checked':False})
+    assert p.batch_execution(w,batch['id'])['status']=='partial'
+    at.run()
+    click(at,'定位错误作答')
+    assert next(s for s in at.selectbox if s.label=='查看学生原始作答').options==['001 / 11']
+    click(at,'定位异常作答')
+    assert next(s for s in at.selectbox if s.label=='查看学生原始作答').options==['003 / 11']
+    assert {'作答与批改','原卷与校对','学生反馈'} <= {tab.label for tab in at.tabs}
+
+def test_student_chat_input_answers_text_without_attachment(app):
+    at,calls=app
+    click(at,'进入学生学习中心')
+    at.chat_input[0].set_value('为什么等式两边可以同时除以2？').run()
+    assert not at.exception
+    assert calls==['study_dialogue']
+    workspace=at.session_state['studio_workspace']
+    assert workspace['submissions'][0]['question']=='为什么等式两边可以同时除以2？'
+    assert workspace['study_sessions'][0]['turns'][0]['action']=='reply'
+    at.run()
+    assert calls==['study_dialogue']
+
+
+def test_student_pdf_attachment_keeps_question_until_selected_page_is_confirmed(app,monkeypatch):
+    import shutil
+    from test_assignment_upload import pdf_file
+    if not shutil.which('pdfinfo') or not shutil.which('pdftoppm'):
+        pytest.skip('Poppler required')
+    at,_=app
+    transport=ai.completion
+    pages=[]
+    sent=[]
+    def model(messages,**kwargs):
+        if kwargs['purpose']=='ocr':
+            parts=messages[1]['content']
+            assert parts[1]['image_url']['url'].startswith('data:image/')
+            pages.append(parts[1]['image_url']['url'])
+            return {'transcription':'原文', 'warnings':[], 'records':[
+                {'question_no':str(len(pages)), 'question':f'第 {len(pages)} 页的数学题',
+                 'steps':[], 'answer':'', 'question_type':'解答题'}]}
+        sent.append(json.loads(messages[1]['content']))
+        return transport(messages,**kwargs)
+    monkeypatch.setattr(ai,'completion',model)
+    click(at,'进入学生学习中心')
+    attachment=pdf_file(18,2,'math.pdf')
+    at.chat_input[0].upload('math.pdf',attachment.getvalue(),'application/pdf').set_value('先提示我怎么做').run()
+    assert not at.exception
+    assert not pages and not sent
+    assert next(box for box in at.selectbox if box.label=='预览附件页面').options==['math.pdf · 第 1 页','math.pdf · 第 2 页']
+    next(box for box in at.checkbox if box.label.startswith('我已移除个人信息')).check().run()
+    click(at,'识别附件')
+    assert len(pages)==2 and pages[0]!=pages[1] and not sent
+    next(box for box in at.checkbox if box.label=='我已核对题目、条件和作答内容。').check().run()
+    click(at,'确认校对并保存材料')
+    assert not sent
+    second=at.session_state['studio_workspace']['submissions'][1]
+    next(box for box in at.selectbox if box.label=='当前学习题目').set_value(second['id']).run()
+    assert next(field for field in at.text_area if field.label=='继续追问 / 回答 AI').value=='先提示我怎么做'
+    click(at,'发送问题或回答')
+    assert len(sent)==1 and sent[0]['question']==second['question'] and sent[0]['reply']=='先提示我怎么做'

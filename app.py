@@ -18,9 +18,10 @@ from core.ocr import recognize_image as request_ocr, prepare_image
 from core.storage import load_runs as disk_load, append_record as disk_append, save_review as disk_review, STUDENT_STORE
 from core.workflow import read_csv, make_run, make_exercise, import_run, REQUIRED
 from ui.experience import PAGES as STUDIO_PAGES, render as render_studio, navigation
+from ui.design import BRAND_NAME, BRAND_ENGLISH, BRAND_TITLE
 
 ROOT = Path(__file__).resolve().parent
-st.set_page_config(page_title='MindTrace · 知错 AI', page_icon='📘', layout='wide')
+st.set_page_config(page_title=BRAND_TITLE, page_icon='📘', layout='wide')
 st.markdown('<style>' + (ROOT / 'assets/style.css').read_text(encoding='utf-8') + '</style>', unsafe_allow_html=True)
 PAGES = STUDIO_PAGES + ['教师批量分析', '证据复核与统计', '学生辅导体验', '学习认知画像', '运行记录']
 STATUS = {'correct': '结果正确', 'incorrect': '结果不一致', 'unverified': '未验证'}
@@ -156,11 +157,12 @@ def result_table(run, key):
 
 
 with st.sidebar:
-    st.markdown('<div class="brand"><div class="brand-mark">m.</div><div><div class="brand-name">MindTrace</div><div class="brand-sub">知错 AI · TEACHING STUDIO</div></div></div>', unsafe_allow_html=True)
+    st.markdown('<div class="brand"><div class="brand-mark">m.</div><div><div class="brand-name">'+BRAND_ENGLISH+'</div><div class="brand-sub">'+BRAND_NAME+'</div></div></div>', unsafe_allow_html=True)
     page, workspace_role = navigation()
     st.divider()
-    st.caption('● AI 服务已启用' if ai_ready() else '○ AI 服务暂未启用')
-    st.caption('已连接服务器课堂记录。' if st.session_state.get('collab_access') else ('学习记录仅留当前会话，请及时留存。' if SHARED_MODE else '学习记录已在本机保存。'))
+    if not ai_ready():st.caption('AI 暂不可用')
+    if SHARED_MODE and not st.session_state.get('collab_access') and workspace_role=='学生学习空间':
+        st.caption('自主学习记录仅保留在本次会话。')
     if DEVELOPER_ENABLED:
         with st.expander('开发者设置', expanded=False):
             st.checkbox('使用临时自带 Key', key='use_visitor_key', on_change=clear_visitor_key)
@@ -177,7 +179,7 @@ with st.sidebar:
                 except (RuntimeError, ValueError) as exc:
                     st.error(str(exc))
 
-st.markdown('<div class="topline"><span>MindTrace &nbsp; / &nbsp; <strong>' + html.escape(page) + '</strong></span><span class="pill">' + html.escape(workspace_role if workspace_role!='产品首页' else '高中数学学习平台') + '</span></div>', unsafe_allow_html=True)
+st.markdown('<div class="topline"><span>' + BRAND_TITLE + ' &nbsp; / &nbsp; <strong>' + html.escape(page) + '</strong></span><span class="pill">' + html.escape(workspace_role if workspace_role!='产品首页' else '高中数学学习平台') + '</span></div>', unsafe_allow_html=True)
 
 if page in STUDIO_PAGES:
     render_studio(page, ROOT, SHARED_MODE, visitor_key() if developer_key_mode() else None)
@@ -537,6 +539,6 @@ else:
     if not runs:
         st.info('暂无批次。教师首页完成首次分析后，记录将保存在' + ('当前会话。' if SHARED_MODE else '本地。'))
 
-st.markdown('<div class="footer"><span>MindTrace · 知错 AI &nbsp; / &nbsp; 每一步进步，都有迹可循</span><span>' + ('共享体验 · 记录仅留当前会话' if SHARED_MODE else '本机单用户原型') + ' · 教师保留最终判断</span></div>', unsafe_allow_html=True)
+st.markdown('<div class="footer"><span>' + BRAND_TITLE + '</span><span>' + ('共享体验 · 记录仅留当前会话' if SHARED_MODE else '本机单用户原型') + ' · 教师保留最终判断</span></div>', unsafe_allow_html=True)
 
 

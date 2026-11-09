@@ -70,6 +70,10 @@ class Runtime:
         if self.access:
             collab.adopt(self.w,collab.load(self.access['code']))
             self.before=deepcopy(self.w);st.session_state['collab_snapshot']=deepcopy(self.w)
+        elif not self.shared:
+            latest=store.load()
+            if latest['id']==self.w['id'] and latest['storage_version']>self.w['storage_version']:
+                collab.adopt(self.w,latest)
         return self.w
 
     def prepare_agent(self):
@@ -151,20 +155,25 @@ def manual_form(prefix, student_id='', hide_student=False):
         submit=st.form_submit_button('使用这道题' if hide_student else '保存作业材料',type='primary')
     return dict(student_id=sid,question_no=qno,topic=topic,question=question,steps=steps,answer=answer,task_type=kind,tool_expression=expr,question_type=question_type) if submit else None
 
-def image_input(rt,prefix,self_study=False,allow_unanswered=False,student_id=None,on_save=None,known_questions=None,class_batch=False):
-    formats=['png','jpg','jpeg','webp']+(['pdf'] if class_batch else [])
-    upload_label='上传作业图片或 PDF' if class_batch else '上传题目照片' if self_study else '上传作业图片'
-    files=st.file_uploader(upload_label,type=formats,accept_multiple_files=True,key=prefix+'_photos')
+def image_input(rt,prefix,self_study=False,allow_unanswered=False,student_id=None,on_save=None,known_questions=None,class_batch=False,*,files=None):
+    attached=files is not None
+    if not attached:
+        formats=['png','jpg','jpeg','webp']+(['pdf'] if class_batch else [])
+        upload_label='上传作业图片或 PDF' if class_batch else '上传题目照片' if self_study else '上传作业图片'
+        files=st.file_uploader(upload_label,type=formats,accept_multiple_files=True,key=prefix+'_photos')
     if class_batch:
         st.caption('单张图片 ≤ 8 MB，单份 PDF ≤ 24 MB、24 页，整批 ≤ 128 MB。试题和作答应在同一页；分开的试卷与答题卡需先配对。')
-    with st.expander('识别选项'):
+    with (st.popover('识别选项') if attached else st.expander('识别选项')):
         force_ocr=st.checkbox('重新识别，不复用此前转写（将再次调用 AI）',key=prefix+'_force_ocr')
     signature=tuple((f.file_id,f.name,f.size) for f in files)
     queue_key=prefix+'_upload_queue'
     queue=st.session_state.get(queue_key)
     if not queue or queue['signature']!=signature:
         try:
-            pages,errors=expand_files(files,allow_pdf=class_batch)
+            if attached:
+                pages,errors=expand_files(files,allow_pdf=True,max_files=5,max_pages=12)
+            else:
+                pages,errors=expand_files(files,allow_pdf=class_batch)
         except ValueError as exc:
             pages,errors=[],[('本次上传',str(exc))]
         unique={}
@@ -176,11 +185,14 @@ def image_input(rt,prefix,self_study=False,allow_unanswered=False,student_id=Non
     pages=queue['pages']
     for name,error in queue['errors']:
         st.error(name+'：'+error)
+    if attached and not pages:return []
     if pages:
-        preview=st.selectbox('预览原始图片',list(pages),format_func=lambda digest:pages[digest][0],key=prefix+'_preview')
+        preview=st.selectbox('预览附件页面' if attached else '预览原始图片',list(pages),format_func=lambda digest:pages[digest][0],key=prefix+'_preview')
         st.image(pages[preview][1],width=480)
-    consent=st.checkbox('图片已经匿名化，同意发送至模型进行真实识别。',key=prefix+'_consent')
-    if st.button('识别图片中的题目与步骤',type='primary',disabled=not(pages and consent and rt.ready()),key=prefix+'_ocr'):
+    consent_label='我已移除个人信息，同意发送附件页面供 AI 识别。' if attached else '图片已经匿名化，同意发送至模型进行真实识别。'
+    consent_key=prefix+'_consent'+('_'+digest(signature)[:12] if attached else '')
+    consent=st.checkbox(consent_label,key=consent_key)
+    if st.button('识别附件' if attached else '识别图片中的题目与步骤',type='primary',disabled=not(pages and consent and rt.ready()),key=prefix+'_ocr'):
         if force_ocr:
             queue['drafts'].clear()
         queue['failed'].clear()
@@ -195,7 +207,8 @@ def image_input(rt,prefix,self_study=False,allow_unanswered=False,student_id=Non
                             for question in list(catalog)[:10]]
                     draft=edu.extract_image(data,rt.call,known_questions=shared+list(known_questions or []),compact=class_batch)
                     if not draft['records']:
-                        raise ValueError('没有提取到可批改的题目，请检查是否同页含有题干及答题区域。')
+                        raise ValueError('此页没有识别到题目。可检查原页，或用文字补充题目。' if self_study
+                                         else '没有提取到可批改的题目，请检查是否同页含有题干及答题区域。')
                 draft['filename']=name
                 rt.keep_image(data)
                 queue['drafts'][image_hash]=draft
@@ -240,7 +253,7 @@ def image_input(rt,prefix,self_study=False,allow_unanswered=False,student_id=Non
                        'parent_question_no':'大题号','subquestion_no':'小问号','question':st.column_config.TextColumn('题目与条件',width='large'),
                        'steps':st.column_config.TextColumn('原始步骤 · 可编辑',width='large')})
     incomplete=len(drafts)<len(pages) or bool(queue['errors'])
-    allow_partial=st.checkbox('仅保存已识别页面，剩余页面另行处理',key=key+'_partial') if incomplete and class_batch else True
+    allow_partial=st.checkbox('仅保存已识别页面，剩余页面另行处理',key=key+'_partial') if incomplete and (class_batch or attached) else True
     confirmed=st.checkbox('我已核对题目、条件和作答内容。' if self_study else '我已核对原图、学生归属、题目和作答。',key=key+'_confirmed')
     results=[]
     if st.button('确认校对并保存材料',disabled=not(confirmed and allow_partial),key=prefix+'_save_ocr'):
@@ -277,7 +290,7 @@ def analyze(rt,items,force=False):
                 st.info('其他题目继续等待，已成功的结果会复用。')
                 break
 
-def source_panel(rt,sub,show_student=True):
+def source_panel(rt,sub,show_student=True,*,show_transcription=True):
     image=rt.image(sub.get('image_ref'))
     if image:
         st.image(image,width=480)
@@ -288,7 +301,7 @@ def source_panel(rt,sub,show_student=True):
     for i,line in enumerate(sub['steps'],1):
         st.text(f'{i:02d}  {line}')
     st.text('最终答案：'+(sub['answer'] or '未提供'))
-    if sub.get('transcription') and show_student:
+    if show_transcription and sub.get('transcription') and show_student:
         with st.expander('完整转写与图像指纹'):
             st.text(sub['transcription'])
             st.code(sub['image_ref'])

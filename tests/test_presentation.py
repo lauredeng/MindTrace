@@ -65,6 +65,24 @@ def test_question_type_and_subpart_identity_survive_save(tmp_path):
     path=tmp_path/'store.json';c.save(w,path)
     assert [r['label'] for r in v.heatmap_rows(c.load(path),b['id'])]==['17(1)','17(2)']
 
+
+def test_shared_pdf_stem_collapses_ocr_variants_without_combining_different_exams():
+    w=c.new_workspace()
+    stems=['圆的半径是几？','求这个圆的半径。','求圆的面积。']
+    materials=[]
+    rows=[]
+    for sid,stem,original,image in zip('ABC',stems,'abc','112'):
+        row=dict(student_id=sid,question=stem,answer='2',question_type='填空题',question_no='1',
+                 steps=[],image_ref=image*64,source_pages=[1])
+        rows.append(row)
+        materials.append(dict(student_id=sid,kind='pdf',identity_status='file_group',pages=[
+            dict(file_id=original*64,original_file=original*64,original_image=image*64,page_number=1,
+                 filename=sid+'.pdf',transcription='',recognition_status='recognized',recognized_records=[row])]))
+    b=p.create_batch(w,'题面证据',rows,materials=materials,grading_policy=p.CLASSROOM_POLICY)
+    p.quick_check(w['submissions'][0],lambda *a,**k:dict(verdict='correct',process_checked=False,basis='答案核对。'))
+    cells=v.heatmap_rows(w,b['id'],automatic=True)
+    assert sorted((len(r['submission_ids']),r['correct'],r['waiting']) for r in cells)==[(1,0,1),(2,1,1)]
+
 def test_old_unknown_not_guessed_and_metadata_update_does_not_rewrite_math():
     w,b=fixture();sub=w['submissions'][0];before=sub['question'];fingerprint=sub['fingerprint']
     rows=[dict(q,question_type='选择题',parent_question_no='',subquestion_no='') for q in b['questions']]

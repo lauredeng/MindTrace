@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import unicodedata
 
 from PIL import Image, ImageOps
 from core.ocr import prepare_image
@@ -51,8 +52,8 @@ def _pdf_pages(data, remaining, *, max_bytes=MAX_PDF_BYTES):
         return [path.read_bytes() for path in files]
 
 
-def expand_files(files, *, allow_pdf):
-    maximum=MAX_CLASS_FILES if allow_pdf else 5
+def expand_files(files, *, allow_pdf, max_files=None, max_pages=MAX_CLASS_PAGES):
+    maximum=max_files if max_files is not None else MAX_CLASS_FILES if allow_pdf else 5
     if len(files)>maximum or sum(file.size for file in files)>MAX_CLASS_BYTES:
         raise ValueError(f'一次最多 {maximum} 份文件，总大小不超过 128 MB。')
     pages=[]
@@ -62,12 +63,12 @@ def expand_files(files, *, allow_pdf):
         try:
             data=file.getvalue()
             if allow_pdf and Path(file.name).suffix.lower()=='.pdf':
-                extracted=_pdf_pages(data,MAX_CLASS_PAGES-len(pages))
+                extracted=_pdf_pages(data,max_pages-len(pages))
                 current=[(f'{file.name} · 第 {i} 页',page) for i,page in enumerate(extracted,1)]
             else:
                 current=[(file.name,data)]
-            if len(pages)+len(current)>MAX_CLASS_PAGES:
-                raise ValueError('整批最多 160 页，请拆成两批。')
+            if len(pages)+len(current)>max_pages:
+                raise ValueError(f'本次最多 {max_pages} 页，请分次上传。')
             total=used_bytes+sum(len(data) for _,data in current)
             if total>MAX_CLASS_BYTES:
                 raise ValueError('转图后的页面总量超过 128 MB，请拆成两批。')
@@ -86,6 +87,48 @@ def student_number(value):
     if not re.fullmatch(r'[A-Z0-9][A-Z0-9_-]{0,79}',value):
         raise ValueError('学生编号请使用字母、数字、连字符或下划线。')
     return value
+
+
+def school_number(value):
+    number=unicodedata.normalize('NFKC',value).strip()
+    if not re.fullmatch(r'[0-9]{1,32}',number):
+        raise ValueError('学号请填写 1–32 位数字，前导零也要保留。')
+    return number
+
+
+def parse_roster(value):
+    numbers=[school_number(item) for item in re.split(r'[\s,，、;；]+',value.strip()) if item]
+    if len(numbers)>1000 or len(set(numbers))!=len(numbers):
+        raise ValueError('班级名单最多 1000 个学号，请删除重复学号。')
+    return numbers
+
+
+def identify_materials(documents,order,*,mode,overrides=None,roster=()):
+    """Resolve teacher-confirmed IDs without using OCR text or modifying pages."""
+    overrides=overrides or {}
+    roster=set(roster)
+    identities,errors={},{}
+    for key in order if mode=='pdf' else order[:1]:
+        stem=Path(documents[key]['name']).stem
+        filename=unicodedata.normalize('NFKC',stem).strip()
+        fallback=filename if mode=='pdf' and re.fullmatch(r'[0-9]+',filename) else ''
+        manual=overrides.get(key,'').strip()
+        raw=manual or fallback
+        if not raw or raw=='匿名':
+            continue
+        try:
+            number=school_number(raw)
+            if roster and number not in roster:
+                raise ValueError('学号不在本班名单。请改填学号或标为匿名。')
+        except ValueError as exc:
+            errors[key]=str(exc)
+        else:
+            identities[key]=(number,'manual' if manual else 'filename')
+    duplicates=Counter(number for number,_ in identities.values())
+    for key,(number,_) in identities.items():
+        if duplicates[number]>1:
+            errors[key]='本批有多份 PDF 使用同一学号，请核对或移除重复文件。'
+    return identities,errors
 
 
 def upload_documents(files, mode, limit_bytes):
@@ -169,10 +212,11 @@ def combine_regions(data,regions):
 
 def process_pages(documents,keys,states,call,*,mode,limit_bytes,budget=20,progress=lambda *_:None):
     from core import education as e, product as p
-    from core.ai import InvalidModelJSON, OutputTruncatedError
+    from core.ai import InvalidModelJSON, OutputTruncatedError, ServiceUnavailable
     from core.limits import UsageLimitError
     previous=[]
     previous_page=[]
+    service_failures=0
     reusable={draft['question_cache_key']:draft for state in states.values() for draft in state['drafts'].values()
               if 'question_cache_key' in draft}
     for key in keys:
@@ -203,17 +247,18 @@ def process_pages(documents,keys,states,call,*,mode,limit_bytes,budget=20,progre
                 state.get('splits',{}).pop(index,None)
                 state['error']=''
                 progress(doc['name'],index+1,len(state['pages']),'复用相同题面')
-            format_retry=set()
+            format_retry=state.setdefault('compact_regions',{}).setdefault(index,set())
             while draft is None:
-                if not budget:return '已达到本轮识别请求数，请继续下一批。'
-                budget-=1
+                if budget is not None:
+                    if not budget:return '已达到本轮识别请求数，请继续下一批。'
+                    budget-=1
                 splits=state.setdefault('splits',{})
                 parts=splits.get(index)
                 completed=parts['done'] if parts else []
                 bounds=parts['bounds'][len(completed)] if parts else None
                 current=previous+[row for part in completed for row in part['records']]
                 catalog={p.item_key(row):row['question'] for row in current}
-                known=[{'id':qid,'question':question} for qid,question in list(catalog.items())[-10:]]
+                known=[{'id':qid,'question':question} for qid,question in list(catalog.items())[-6:]]
                 region={(0,56):'上半部分',(44,100):'下半部分'}.get(bounds,f'{bounds[0]}%–{bounds[1]}% 区域') if bounds else None
                 progress(doc['name'],index+1,len(state['pages']),region)
                 try:
@@ -221,6 +266,7 @@ def process_pages(documents,keys,states,call,*,mode,limit_bytes,budget=20,progre
                     result=e.extract_image(source,call,known_questions=known,compact=True,
                                            assignment_page=True,region=region,open_question=parent,
                                            repair_format=bounds in format_retry,max_bytes=limit_bytes)
+                    service_failures=0
                     if not (result['records'] or result['answers'] or result['no_work']):
                         raise ValueError('本页未识别出题干或作答，请检查原图后重试。')
                     if parts is None:
@@ -249,6 +295,12 @@ def process_pages(documents,keys,states,call,*,mode,limit_bytes,budget=20,progre
                 except UsageLimitError as exc:
                     state['error']=f'第 {index+1} 页{region or ""}：{exc}'
                     return str(exc)
+                except ServiceUnavailable as exc:
+                    service_failures+=1
+                    state['error']=f'第 {index+1} 页{region or ""}：{exc}'
+                    if service_failures>=2:
+                        return '识别服务连续失败。已保留完成的页面和分区，服务恢复后可继续。'
+                    break
                 except (RuntimeError,ValueError,OSError) as exc:
                     state['error']=f'第 {index+1} 页{region or ""}：'+('无法读取页面图像。' if isinstance(exc,OSError) else str(exc))
                     break
@@ -259,6 +311,7 @@ def process_pages(documents,keys,states,call,*,mode,limit_bytes,budget=20,progre
                         draft['question_cache_key']=cache_key
                         reusable[cache_key]=draft
                     state['drafts'][index]=draft
+                    state['compact_regions'].pop(index,None)
                     splits.pop(index,None)
                     fresh.discard(index)
                     state['error']=''
@@ -272,9 +325,9 @@ def process_pages(documents,keys,states,call,*,mode,limit_bytes,budget=20,progre
 
 def question_number(item):
     import unicodedata
-    value=unicodedata.normalize('NFKC',item['question_no']).strip().rstrip('.、:')
+    value=unicodedata.normalize('NFKC',item.get('question_no','')).strip().rstrip('.、:')
     match=re.fullmatch(r'(?:第\s*)?(\d+)\s*题?\s*(?:(?:[.\-]\s*)?\(?\s*(\d+)\s*\)?)?',value)
-    if item['parent_question_no'] and item['subquestion_no']:
+    if item.get('parent_question_no') and item.get('subquestion_no'):
         parent=re.search(r'\d+',item['parent_question_no'])
         child=re.search(r'\d+',item['subquestion_no'])
         if parent and child:return int(parent[0]),int(child[0])
@@ -314,15 +367,20 @@ def merge_work(row,item,number):
     if item.get('answer_status')=='unreadable':row['unreadable_work']=True
 
 
-def assemble_materials(documents,order,states,*,mode):
+def assemble_materials(documents,order,states,*,mode,overrides=None,roster=()):
     from core import product as p
     groups=[[key] for key in order] if mode=='pdf' else [order]
     if not order or duplicate_files(documents):
         raise ValueError('请移除重复文件。')
+    identities,errors=identify_materials(documents,order,mode=mode,overrides=overrides,roster=roster)
+    if errors:
+        key,error=next(iter(errors.items()))
+        raise ValueError(documents[key]['name']+' · '+error)
     materials,rows=[],[]
     for keys in groups:
         ids=sorted(documents[key]['file_id'] for key in keys)
-        student='PAPER-'+(ids[0] if mode=='pdf' else sha256(''.join(ids).encode()).hexdigest())
+        anonymous='PAPER-'+(ids[0] if mode=='pdf' else sha256(''.join(ids).encode()).hexdigest())
+        student,identity_status=identities.get(keys[0],(anonymous,'file_group'))
         pages,questions=[],{}
         numbered={}
         work={}
@@ -390,13 +448,16 @@ def assemble_materials(documents,order,states,*,mode):
                     if p.question_key(shared)!=p.question_key(row['question']) and re.sub(r'\s+','',shared) not in re.sub(r'\s+','',row['question']):
                         row['question']=shared+'\n'+row['question']
                     row['source_pages']=list(set(row['source_pages'])|{number for number,_ in work[common[0]]})
+                    if row['stem_status']=='subquestion':row['stem_status']='complete'
             unreadable=row.pop('unreadable_work',False)
-            if row.pop('stem_status')!='complete' or (unreadable and not (row['answer'] or row['steps'])):
+            if row.pop('stem_status')!='complete':
+                row['submission_status']='unreadable'
+            if unreadable and not (row['answer'] or row['steps']):
                 row['answer']=('[无法辨认] '+row['answer']).strip()[:2000]
             row['source_pages'].sort()
             row['image_ref']=pages[row['source_pages'][0]-1]['original_image']
             row['steps']='\n'.join(row['steps'])
             row['transcription']='\n'.join(pages[n-1]['transcription'] for n in row['source_pages'])[:20000]
             rows.append(row)
-        materials.append({'student_id':student,'kind':mode,'identity_status':'file_group','pages':pages})
+        materials.append({'student_id':student,'kind':mode,'identity_status':identity_status,'pages':pages})
     return materials,rows
