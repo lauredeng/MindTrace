@@ -529,10 +529,11 @@ def student_composer(rt,sid):
     with st.container(key='student_composer'):
         sent=st.chat_input('输入数学题，或描述你卡在哪一步',key=key,max_chars=2000,
                            accept_file='multiple',file_type=['pdf','png','jpg','jpeg','webp'])
-        st.caption('可直接发文字，也可附上图片或 PDF。每次最多 5 个附件、合计 12 页。')
+        st.caption('发送图片或 PDF 后自动识别。每次最多 5 个附件、合计 12 页。')
+        new_attachment=bool(sent and sent.files)
         if sent:
             question=sent.text.strip()
-            if sent.files:
+            if new_attachment:
                 st.session_state[pending_upload]=(sent.files,question)
             elif question:
                 sub=rt.add({'student_id':sid,'question':question},'self_study',allow_unanswered=True)
@@ -559,7 +560,8 @@ def student_composer(rt,sid):
             if question:
                 st.caption('附带的问题会在核对题目后带入答疑。')
                 st.text(question)
-            saved=image_input(rt,key+'_attachments',True,allow_unanswered=True,student_id=sid,files=files)
+            saved=image_input(rt,key+'_attachments',True,allow_unanswered=True,student_id=sid,
+                              files=files,recognize_on_submit=new_attachment)
             if saved:
                 st.session_state.pop(pending_upload,None)
                 st.session_state['v12_sub_pending']=saved[0]['id']

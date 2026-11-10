@@ -155,7 +155,8 @@ def manual_form(prefix, student_id='', hide_student=False):
         submit=st.form_submit_button('使用这道题' if hide_student else '保存作业材料',type='primary')
     return dict(student_id=sid,question_no=qno,topic=topic,question=question,steps=steps,answer=answer,task_type=kind,tool_expression=expr,question_type=question_type) if submit else None
 
-def image_input(rt,prefix,self_study=False,allow_unanswered=False,student_id=None,on_save=None,known_questions=None,class_batch=False,*,files=None):
+def image_input(rt,prefix,self_study=False,allow_unanswered=False,student_id=None,on_save=None,
+                known_questions=None,class_batch=False,*,files=None,recognize_on_submit=False):
     attached=files is not None
     if not attached:
         formats=['png','jpg','jpeg','webp']+(['pdf'] if class_batch else [])
@@ -189,14 +190,18 @@ def image_input(rt,prefix,self_study=False,allow_unanswered=False,student_id=Non
     if pages:
         preview=st.selectbox('预览附件页面' if attached else '预览原始图片',list(pages),format_func=lambda digest:pages[digest][0],key=prefix+'_preview')
         st.image(pages[preview][1],width=480)
-    if attached and self_study:
-        st.caption('点击「识别附件」会将页面发送给 AI。请先遮挡姓名、学号等个人信息。')
-        consent=True
+    student_attachment=attached and self_study
+    ready=rt.ready()
+    if student_attachment:
+        retry_requested=st.session_state.pop(prefix+'_retry_requested',False)
+        recognize=recognize_on_submit or retry_requested
     else:
         consent_key=prefix+'_consent'+('_'+digest(signature)[:12] if attached else '')
         consent=st.checkbox('图片已经匿名化，同意发送至模型进行真实识别。',key=consent_key)
-    if st.button('识别附件' if attached else '识别图片中的题目与步骤',type='primary',disabled=not(pages and consent and rt.ready()),key=prefix+'_ocr'):
-        if force_ocr:
+        recognize=st.button('识别附件' if attached else '识别图片中的题目与步骤',
+                            type='primary',disabled=not(pages and consent and ready),key=prefix+'_ocr')
+    if recognize and pages and ready:
+        if force_ocr and not recognize_on_submit:
             queue['drafts'].clear()
         queue['failed'].clear()
         progress=st.progress(len(queue['drafts'])/len(pages))
@@ -224,10 +229,14 @@ def image_input(rt,prefix,self_study=False,allow_unanswered=False,student_id=Non
         rt.persist()
     drafts=list(queue['drafts'].values())
     if pages:
-        st.caption(f'已识别 {len(drafts)} / {len(pages)} 页。再次点击会继续识别未完成页，除非选择重新识别。')
+        status=f'已识别 {len(drafts)} / {len(pages)} 页。'
+        st.caption(status if student_attachment else status+'再次点击会继续识别未完成页，除非选择重新识别。')
     for image_hash,error in queue['failed'].items():
         st.warning(pages[image_hash][0]+'：'+error)
-    if not rt.ready():
+    if student_attachment and (len(drafts)<len(pages) or force_ocr):
+        st.button('重新识别附件' if force_ocr else '重试未识别页面',disabled=not ready,
+                  key=prefix+'_ocr',on_click=st.session_state.__setitem__,args=(prefix+'_retry_requested',True))
+    if not ready:
         st.info('AI 服务尚未启用，仍可保存文本材料。')
     flat=[]
     if drafts:

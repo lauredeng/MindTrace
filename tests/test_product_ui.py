@@ -304,7 +304,8 @@ def test_student_chat_input_answers_text_without_attachment(app):
     assert calls==['study_dialogue']
 
 
-def test_student_pdf_attachment_keeps_question_until_selected_page_is_confirmed(app,monkeypatch):
+@pytest.mark.parametrize('retry',[False,True])
+def test_student_pdf_attachment_recognizes_on_send_and_keeps_question_until_confirmed(app,monkeypatch,retry):
     import shutil
     from test_assignment_upload import pdf_file
     if not shutil.which('pdfinfo') or not shutil.which('pdftoppm'):
@@ -318,8 +319,11 @@ def test_student_pdf_attachment_keeps_question_until_selected_page_is_confirmed(
             parts=messages[1]['content']
             assert parts[1]['image_url']['url'].startswith('data:image/')
             pages.append(parts[1]['image_url']['url'])
+            if retry and len(pages)==2:
+                raise RuntimeError('离线模拟识别失败')
+            page_number=len(set(pages))
             return {'transcription':'原文', 'warnings':[], 'records':[
-                {'question_no':str(len(pages)), 'question':f'第 {len(pages)} 页的数学题',
+                {'question_no':str(page_number), 'question':f'第 {page_number} 页的数学题',
                  'steps':[], 'answer':'', 'question_type':'解答题'}]}
         sent.append(json.loads(messages[1]['content']))
         return transport(messages,**kwargs)
@@ -328,13 +332,17 @@ def test_student_pdf_attachment_keeps_question_until_selected_page_is_confirmed(
     attachment=pdf_file(18,2,'math.pdf')
     at.chat_input[0].upload('math.pdf',attachment.getvalue(),'application/pdf').set_value('先提示我怎么做').run()
     assert not at.exception
-    assert not pages and not sent
+    assert len(pages)==2 and pages[0]!=pages[1] and not sent
     assert next(box for box in at.selectbox if box.label=='预览附件页面').options==['math.pdf · 第 1 页','math.pdf · 第 2 页']
     assert not any(box.label.startswith('我已移除个人信息') for box in at.checkbox)
-    assert any('点击「识别附件」会将页面发送给 AI' in caption.value for caption in at.caption)
-    assert not next(button for button in at.button if button.label=='识别附件').disabled
-    click(at,'识别附件')
-    assert len(pages)==2 and pages[0]!=pages[1] and not sent
+    assert not any('点击「识别附件」会将页面发送给 AI' in caption.value for caption in at.caption)
+    at.run()
+    assert len(pages)==2 and not sent
+    if retry:
+        assert any('离线模拟识别失败' in warning.value for warning in at.warning)
+        click(at,'重试未识别页面')
+        assert len(pages)==3 and pages[2]==pages[1]
+    assert not any(button.label in ('识别附件','重试未识别页面') for button in at.button)
     next(box for box in at.checkbox if box.label=='我已核对题目、条件和作答内容。').check().run()
     click(at,'确认校对并保存材料')
     assert not sent
