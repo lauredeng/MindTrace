@@ -244,12 +244,18 @@ h1 {font-size:1.75rem!important;}
 .landing-classic>p{color:#53627c;line-height:1.8;max-width:46rem}
 :is(.st-key-v11_surface_home_teacher,.st-key-v11_surface_home_student){
  --role-ink:#243650;--role-muted:#536681;--role-accent:#3158c7;--role-line:#e7edf7;--role-hover:#edf3ff;
+ --role-transform:none;--role-layer:auto;
  padding:0!important;overflow:hidden;background:#fff!important;border:1px solid #e0e8f5!important;
  border-radius:18px!important;
  transition:transform .46s cubic-bezier(.22,.8,.27,1.25),box-shadow .32s ease,border-color .24s ease;
 }
-:is(.st-key-v11_surface_home_teacher,.st-key-v11_surface_home_student):has([class*="st-key-home_select_"] button[kind="primary"]){
+/* Hover takes precedence over the stored selection, which also supports touch. */
+.st-key-home_role_grid :is(.st-key-v11_surface_home_teacher,.st-key-v11_surface_home_student):is(
+ :hover,
+ :has([class*="st-key-home_select_"] button[kind="primary"]):not(.st-key-home_role_grid:has(:is(.st-key-v11_surface_home_teacher,.st-key-v11_surface_home_student):hover) *)
+){
  --role-ink:#fff;--role-muted:#eef3ff;--role-accent:#fff;--role-line:#ffffff3d;--role-hover:#ffffff1a;
+ --role-transform:translateY(-3px) scale(1.032);--role-layer:1;
  background:
   radial-gradient(circle at 95% -9%,#d9e7ff24 0 57px,#dce7ff13 58px 96px,transparent 97px),
   radial-gradient(ellipse at 100% 100%,#79a4ff59 0,transparent 70%),
@@ -293,8 +299,8 @@ h1 {font-size:1.75rem!important;}
  :is(.st-key-home_select_teacher,.st-key-home_select_student) button{min-height:134px;padding:19px 19px!important}
 }
 @media(min-width:701px) and (prefers-reduced-motion:no-preference){
- :is(.st-key-v11_surface_home_teacher,.st-key-v11_surface_home_student):has([class*="st-key-home_select_"] button[kind="primary"]){
-  transform:translateY(-3px) scale(1.032);z-index:1;
+ :is(.st-key-v11_surface_home_teacher,.st-key-v11_surface_home_student){
+  transform:var(--role-transform);z-index:var(--role-layer);
  }
 }
 @media(prefers-reduced-motion:reduce){

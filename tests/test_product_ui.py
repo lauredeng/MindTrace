@@ -330,7 +330,9 @@ def test_student_pdf_attachment_keeps_question_until_selected_page_is_confirmed(
     assert not at.exception
     assert not pages and not sent
     assert next(box for box in at.selectbox if box.label=='预览附件页面').options==['math.pdf · 第 1 页','math.pdf · 第 2 页']
-    next(box for box in at.checkbox if box.label.startswith('我已移除个人信息')).check().run()
+    assert not any(box.label.startswith('我已移除个人信息') for box in at.checkbox)
+    assert any('点击「识别附件」会将页面发送给 AI' in caption.value for caption in at.caption)
+    assert not next(button for button in at.button if button.label=='识别附件').disabled
     click(at,'识别附件')
     assert len(pages)==2 and pages[0]!=pages[1] and not sent
     next(box for box in at.checkbox if box.label=='我已核对题目、条件和作答内容。').check().run()

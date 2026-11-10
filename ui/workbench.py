@@ -189,9 +189,12 @@ def image_input(rt,prefix,self_study=False,allow_unanswered=False,student_id=Non
     if pages:
         preview=st.selectbox('预览附件页面' if attached else '预览原始图片',list(pages),format_func=lambda digest:pages[digest][0],key=prefix+'_preview')
         st.image(pages[preview][1],width=480)
-    consent_label='我已移除个人信息，同意发送附件页面供 AI 识别。' if attached else '图片已经匿名化，同意发送至模型进行真实识别。'
-    consent_key=prefix+'_consent'+('_'+digest(signature)[:12] if attached else '')
-    consent=st.checkbox(consent_label,key=consent_key)
+    if attached and self_study:
+        st.caption('点击「识别附件」会将页面发送给 AI。请先遮挡姓名、学号等个人信息。')
+        consent=True
+    else:
+        consent_key=prefix+'_consent'+('_'+digest(signature)[:12] if attached else '')
+        consent=st.checkbox('图片已经匿名化，同意发送至模型进行真实识别。',key=consent_key)
     if st.button('识别附件' if attached else '识别图片中的题目与步骤',type='primary',disabled=not(pages and consent and rt.ready()),key=prefix+'_ocr'):
         if force_ocr:
             queue['drafts'].clear()
