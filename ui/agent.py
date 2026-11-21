@@ -9,7 +9,11 @@ def _invoke(rt,fn,*args,**kwargs):
         st.warning('本次操作未完成，请检查输入；若另一窗口正在处理，请稍后刷新查看。');st.stop()
 
 def render(rt,sub):
+    from ui.tutoring import handoff
+    if handoff(rt,sub,key='official_agent_'+sub['id']):return
     sid=sub['student_id'];current=a.latest_run(rt.w,sub['id'],sid)
+    if current and current['status']!='cancelled' and not a.current_material(current,sub):
+        a.cancel(rt.w,sub['id'],sid);rt.persist();st.rerun()
     st.caption('围绕这道题选择追问、讲解或局部核验；需要你回答时会暂停。你随时可以切换到直接答疑。')
     if not current or current['status']=='cancelled':
         if st.button('开始深度辅导',type='primary',disabled=not rt.ready(),key='agent_start_'+sub['id']):
@@ -33,7 +37,7 @@ def render(rt,sub):
             if turn['reply']:st.write('我的回答：'+turn['reply'])
             message(turn['message']);st.caption('这次在解决：'+turn['purpose'])
     if current and current['status'] in ('waiting_consent','practice_blocked'):
-        st.caption('新题验证由你选择；只有参考解通过现有局部数学核验才发布。')
+        st.caption('生成针对本题的练习，发布前核对题意、参考解与评分要点。')
         if st.button('愿意，生成一道验证题',disabled=not rt.ready(),key='agent_accept_'+current['id']):
             with st.spinner('生成并核对参考解…'):_invoke(rt,a.accept_practice,sub['id'],sid,rt.call)
             st.rerun()
@@ -41,14 +45,16 @@ def render(rt,sub):
     practice=(current or {}).get('practice')
     if practice and practice['learning'].get('exercise'):
         ex=practice['learning']['exercise'];st.subheader('自愿的新题验证');message(ex['question'])
-        st.caption(ex['objective']+' 工具仅支持局部核验，不构成完整证明。')
+        for option,content in ex.get('options',{}).items():message(option+'．'+content)
+        from core.exercise_review import label
+        st.caption(ex['objective']+' · '+label(ex))
         if st.button('查看练习参考解',key='agent_answer_'+ex['id']):
             ex['answer_revealed']=True;rt.persist();st.rerun()
         if ex['answer_revealed']:
             message(ex['answer'])
             for line in ex['reference_steps']:message(line)
         with st.form('agent_practice_'+ex['id']):
-            answer=st.text_area('验证题答案',max_chars=2000)
+            answer=st.text_area('验证题答案',max_chars=2000,placeholder='多选填写完整选项，如 AC；解集可写 π/6，π/3。')
             steps=st.text_area('验证题过程 · 每行一步',max_chars=8000)
             submit=st.form_submit_button('提交验证题',disabled=not rt.ready())
         if submit:
@@ -88,7 +94,7 @@ def render(rt,sub):
             for trace in current['trace']:
                 if trace.get('policy')=='allowed':
                     st.markdown('**'+a.ACTIONS[trace['action']]+'** · '+trace['rationale'])
-                    labels=[{'QUESTION':'原题','ANSWER':'原答案','REPLY':'你的回答','TEACHER_REVIEW':'教师意见','AI_ANALYSIS':'原有AI分析（待核对）','PRIOR_EXPLANATION':'先前讲解','PRACTICE_LAST':'最近验证题'}.get(k,'第'+k[1:]+'步' if k.startswith('S') else '局部核验结果') for k in trace['evidence_ids']]
+                    labels=[{'QUESTION':'原题','ANSWER':'原答案','REPLY':'你的回答','TEACHER_REVIEW':'教师意见','AI_ANALYSIS':'原有AI分析（待核对）','PRIOR_EXPLANATION':'先前讲解','PRACTICE_LAST':'最近验证题','LEARNING_MEMORY':'历史学习证据'}.get(k,'第'+k[1:]+'步' if k.startswith('S') else '局部核验结果') for k in trace['evidence_ids']]
                     st.caption('依据：'+'、'.join(labels))
                 else:st.caption('有一个动作因不满足条件而未执行。')
                 observation=trace.get('observation')

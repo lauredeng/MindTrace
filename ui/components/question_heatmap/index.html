@@ -30,7 +30,7 @@ function layout(){
 function render(){
  const root=document.getElementById("root");root.replaceChildren();
  const rows=args.rows||[],maximum=Math.max(0,...rows.map(q=>q.errors));
- for(const type of ["选择题","填空题","解答题","未分类"]){
+ for(const type of ["单选题","多选题","选择题","填空题","解答题","未分类"]){
   const values=rows.filter(q=>q.question_type===type);if(!values.length)continue;
   const section=document.createElement("section");section.className="section";const heading=document.createElement("h3");
   heading.textContent=type==="未分类"?"待确认题型":type;section.appendChild(heading);

@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mindtrace-deeptutor-tools"
+version = "0.1.0"
+description = "Scoped MindTrace classroom and SymPy adapters for official DeepTutor"
+requires-python = ">=3.12"
+
+[project.entry-points."deeptutor.tools"]
+mindtrace_source = "mindtrace_deeptutor_plugin:SourceTool"
+mindtrace_math = "mindtrace_deeptutor_plugin:MathTool"
+mindtrace_learning_evidence = "mindtrace_deeptutor_plugin:EvidenceTool"
+
+[tool.setuptools]
+py-modules = ["mindtrace_deeptutor_plugin"]

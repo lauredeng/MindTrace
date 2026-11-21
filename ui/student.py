@@ -146,11 +146,13 @@ def learning_controls(rt,learning,task,sub):
         st.divider()
         st.subheader('独立训练 · 先做，再看答案')
         message(ex['question'])
+        for option,content in ex.get('options',{}).items():message(option+'．'+content)
         st.caption('训练目标：'+ex['objective'])
         with st.expander('与原错误的关系及参考解检查状态'):
             message(ex['relation_to_error'])
             message(ex['structure_change'])
-            st.caption('参考解局部工具状态：'+ex['reference_tool']['status']+'；复杂题仍需教师复核。')
+            from core.exercise_review import label
+            st.caption(label(ex)+'；计算核验不代替完整证明。')
         if not learning['ended']:
             a,b=st.columns(2)
             if a.button('练习方向提示',key='practice_hint_'+ex['id']):

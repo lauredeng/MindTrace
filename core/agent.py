@@ -7,7 +7,7 @@ from collections import OrderedDict
 from functools import wraps
 from threading import Lock
 from difflib import SequenceMatcher
-from core import classroom as c,education as e,product as p,math_tools
+from core import classroom as c,education as e,product as p,math_tools,math_kernel
 from core.limits import UsageLimitError
 
 ACTIONS={'ask_student':'针对性追问','explain_step':'讲解当前困难','verify_math':'局部数学核验',
@@ -28,7 +28,13 @@ PROMPT='''你是高中数学受控辅导Agent。目标是解决当前题目的�
 ask_student每次只问一个有数学区分目的的问题，不能机械反复问为什么；学生自报懂了不足以证明掌握。
 explain_step解释本题关键依据，尊重学生直接讲解偏好。preference=direct时不得追问或邀请练习。
 verify_math只请求已有程序核验原作答或本次回答，target=reply时需要非空学生回答。你不能生成或执行代码，也不能改写原题。
-数学工具仅覆盖显式有限多项式求导和四次以内实数方程的局部证据。不支持不代表正确；冲突和错误不能包装成通过。
+verify_math可额外提供math_request对象，以调用SymPy的evaluate/derivative/equation/inequality/system/sum/dot/cross/norm/distance/set。
+expression使用显式*和**；支持sin/cos/tan/exp/log/sqrt/abs/binomial/factorial/pi/E；变量x/y/z/a/b/t/n/k。
+domain默认为Reals，可用Integers或区间对象{lower:"0",upper:"pi",left_open:false,right_open:false}。
+system使用variables与equations数组；sum使用variable/lower/upper；向量使用left/right表达式字符串数组。
+expected可省略，仅求结果；比较解集用字符串数组、区间用上述对象、向量用字符串数组。
+source_quote必须逐字引用原题或所选作答中的连续片段。工具只计算你提交的模型，不验证你的建模或整篇证明。
+不允许任意Python代码。含参分类讨论及未建模的几何证明不能直接宣称工具验证通过。不支持不代表判错。
 工具结果返回observations后，再根据实际结果决定下一步。verification_claim=local_checked仅当观察中确有局部核验结果时使用，不表示证明完整。
 offer_practice只是邀请，不能输出新练习答案或默认学生同意。练习生成与参考解验证由学生同意后的程序执行。
 request_teacher在条件缺失、证据冲突难以解决时使用，说明需要核对什么。不得自行修改教师复核结果。
@@ -82,12 +88,21 @@ def latest_run(w,submission_id,student_id):
     row=next((s for s in w.get('study_sessions',[]) if s['submission_id']==submission_id and s['student_id']==student_id),None)
     return (row or {}).get('agent_runs',[])[-1] if (row or {}).get('agent_runs') else None
 
+
+def current_material(run,sub):
+    return (run.get('material_fingerprint')==sub['fingerprint'] and
+            run.get('reference_revision')==sub.get('reference_revision') and
+            run.get('grading_revision')==sub.get('grading_revision'))
+
 def _sources(w,sub,reply):
     sources={'QUESTION':sub['question'],**{'S'+str(i):s for i,s in enumerate(sub['steps'],1)}}
     if sub['answer']:sources['ANSWER']=sub['answer']
     if reply:sources['REPLY']=reply
+    from core.learning_records import recall
+    memory=recall(w,sub['student_id'],exclude_submission=sub['id'])
+    if memory:sources['LEARNING_MEMORY']={'evidence':memory,'authority':'其他题目的有效学习记录，不等同于本题结论或长期能力'}
     review=c.latest_review(w,sub['id'])
-    if review:sources['TEACHER_REVIEW']={'id':review['id'],'decision':review['decision'],'is_error':review.get('is_error'),
+    if review and p.effective(w,sub)['confirmed']:sources['TEACHER_REVIEW']={'id':review['id'],'decision':review['decision'],'is_error':review.get('is_error'),
                                       'label':review['label'],'note':review['note'][:600]}
     analysis=p.current_deep(sub)
     if analysis:sources['AI_ANALYSIS']={'summary':analysis['analysis']['method_summary'][:800],
@@ -113,8 +128,10 @@ def _context_key(w,sub,row):
     notes=[(n['id'],n['primary_category'],n['category_confirmed'],n['notes'],n.get('active_error',True))
            for n in w['notebook'] if n['student_id']==sub['student_id'] and n.get('question_id')==p.item_key(sub) and not n.get('deleted')]
     attempt=next((r['practice']['attempts'][-1]['id'] for r in reversed(row['agent_runs']) if r.get('practice',{}).get('attempts')),None)
+    from core.learning_records import recall
+    memory=recall(w,sub['student_id'],exclude_submission=sub['id'])
     return p.digest([sub['fingerprint'],(review or {}).get('id'),(p.latest(sub,'quick_checks') or {}).get('id'),
-                     (p.current_deep(sub) or {}).get('id'),(p.latest(sub,'solutions') or {}).get('id'),notes,attempt])
+                     (p.current_deep(sub) or {}).get('id'),(p.latest(sub,'solutions') or {}).get('id'),notes,attempt,memory])
 
 
 def _payload(w,sub,row,run):
@@ -133,7 +150,7 @@ def _payload(w,sub,row,run):
     return raw,set(sources)|set(data['observations'])
 
 def _decision(raw,allowed_ids,sub,run,row):
-    if not isinstance(raw,dict) or set(raw)-{'action','goal','rationale','evidence_ids','message','step','target','verification_claim'}:
+    if not isinstance(raw,dict) or set(raw)-{'action','goal','rationale','evidence_ids','message','step','target','verification_claim','math_request'}:
         raise PolicyError('决策必须采用规定结构，不能附带额外命令。')
     action=raw.get('action')
     if not isinstance(action,str) or action not in ACTIONS:raise PolicyError('该动作不在允许范围内。')
@@ -155,10 +172,26 @@ def _decision(raw,allowed_ids,sub,run,row):
         old=[t['message'] for t in row['turns'] if t.get('agent_action')=='ask_student'][-3:]
         if any(SequenceMatcher(None,_norm(message),_norm(q)).ratio()>.85 for q in old):raise PolicyError('追问重复，必须换策略或停止。')
         if len(re.findall('[?？]',message))>1:raise PolicyError('每次最多提出一个问题。')
-    return {'action':action,'goal':_text(raw.get('goal'),400,'当前目标'),'rationale':_text(raw.get('rationale'),400,'动作依据'),
-            'evidence_ids':list(dict.fromkeys(ids)),'message':message,'step':step,'target':target,'verification_claim':claim}
+    out={'action':action,'goal':_text(raw.get('goal'),400,'当前目标'),'rationale':_text(raw.get('rationale'),400,'动作依据'),
+         'evidence_ids':list(dict.fromkeys(ids)),'message':message,'step':step,'target':target,'verification_claim':claim}
+    if raw.get('math_request') is not None:
+        if action!='verify_math':raise PolicyError('只有核验动作可以携带数学请求。')
+        request=math_kernel.validate(raw['math_request'])
+        quote=request.get('source_quote')
+        material=[sub['question'],run['reply']] if target=='reply' else [sub['question'],sub['answer'],*sub['steps']]
+        if not isinstance(quote,str) or not quote.strip() or not any(quote in part for part in material):
+            raise PolicyError('数学模型必须引用所选材料中的真实片段。')
+        out['math_request']=request
+    return out
 
-def _tool(sub,run,target):
+def _tool(sub,run,target,request=None):
+    if request is not None:
+        result=math_kernel.check(request)
+        return {'status':'partial' if result['status'] in ('computed','checked') else 'not_applicable',
+                'scope':'模型计算，不等于原题或学生完整过程已验证。',
+                'checks':[],'calculation':result,'source_quote':request['source_quote'],
+                'model_binding':'requires_reasoning_review',
+                'meaning':'计算基于所提交的表达式和定义域；仍需核对建模、题设及推理。'}
     material=deepcopy(sub)
     if target=='reply':material.update(steps=[run['reply']],answer=run['reply'])
     raw=math_tools.evidence(material)
@@ -192,12 +225,13 @@ def run(w,submission_id,student_id,call,*,reply='',preference='guided',command_i
     if resume:
         if not previous or previous['status'] not in ('paused','failed'):raise ValueError('当前没有可继续的暂停进度。')
         current=previous
-        if current['material_fingerprint']!=sub['fingerprint']:raise ValueError('原始材料已变化，请重新开始。')
+        if not current_material(current,sub):raise ValueError('题目或参考依据已变化，请重新开始辅导。')
         # A failed service call has not published a learning turn; successful tools remain cached.
         current['status']='running';current['context_key']=context_key
     else:
         if len(runs)>=40 or len(row['turns'])>=40:raise ValueError('本题互动已达上限，请保留记录后结束。')
         current={'id':c.uid(),'command_id':command_id or c.uid(),'submission_id':sub['id'],'student_id':student_id,
+                 'reference_revision':sub.get('reference_revision'),'grading_revision':sub.get('grading_revision'),
                  'material_fingerprint':sub['fingerprint'],'context_key':context_key,'reply':reply,'preference':preference,'model_calls':0,'tool_calls':0,
                  'trace':[],'status':'running','created_at':c.now()}
         runs.append(current)
@@ -227,12 +261,14 @@ def run(w,submission_id,student_id,call,*,reply='',preference='guided',command_i
         event.update(decision,policy='allowed');current['trace'].append(event)
         if decision['action']=='verify_math':
             signature=decision['target']
+            request=decision.get('math_request')
+            request_key=p.digest(request) if request else None
             prior=[t for t in current['trace'][:-1] if t.get('action')=='verify_math' and t.get('policy')=='allowed' and t.get('observation')]
-            if current['tool_calls']>=MAX_TOOLS or any(t['target']==signature for t in prior):
+            if current['tool_calls']>=MAX_TOOLS or any(t['target']==signature and (p.digest(t['math_request']) if t.get('math_request') else None)==request_key for t in prior):
                 event.update(policy='rejected',observation={'status':'rejected','reason':'不重复核验相同材料；请使用已有结果或停止。'})
                 continue
             current['tool_calls']+=1
-            try:event['observation']=_tool(sub,current,signature)
+            try:event['observation']=_tool(sub,current,signature,request) if request else _tool(sub,current,signature)
             except Exception:event['observation']={'status':'failed','reason':'数学工具本次未完成，请依据原文或请求教师核对。'}
             continue
         state={'ask_student':'waiting_student','explain_step':'delivered','offer_practice':'waiting_consent',
@@ -253,24 +289,27 @@ def cancel(w,submission_id,student_id):
 def accept_practice(w,submission_id,student_id,call):
     sub,row=session(w,submission_id,student_id);current=latest_run(w,submission_id,student_id)
     if not current or current['status'] not in ('waiting_consent','waiting_practice','practice_blocked'):raise ValueError('当前没有待同意的练习邀请。')
+    if not current_material(current,sub):raise ValueError('题目或参考依据已更新，请重新开始辅导。')
     if current.get('practice',{}).get('learning',{}).get('exercise'):return current['practice']
     judgment=p.effective(w,sub)
     task={'id':'agent-'+current['id'],'student_id':student_id,'mode':'deep',
           'goal':'用一道新题验证本次具体困难，不据一次作答推断长期掌握。',
           'confirmed_label':('教师已确认：' if judgment['confirmed'] else '候选困难，尚未教师确认：')+judgment['basis'],
           'knowledge_points':[]}
-    learning=e.new_learning(task,sub)
-    practice={'consented_at':c.now(),'task':task,'learning':learning,'attempts':[]}
+    practice=current.get('pending_practice') or {'consented_at':c.now(),'task':task,
+        'learning':e.new_learning(task,sub),'attempts':[]}
+    learning=practice['learning']
+    current['pending_practice']=practice
     def scoped_call(system,user,**kwargs):
         system=system.replace('依据教师确认的问题与训练目标','依据本题证据与练习目标，候选错因不是教师确认')
         return call(system,user,**kwargs)
     try:
         ex=e.generate_exercise(learning,task,sub,scoped_call)
-        tool=ex['reference_tool']
-        if tool.get('final_answer_status')!='correct':
-            learning['exercise']=None;current.update(status='practice_blocked',practice_error='新题参考解超出当前自动核验范围，未发布。请教师核对或选择直接讲解。')
+        if ex.get('validation',{}).get('status') not in ('symbolic_and_ai_reviewed','ai_reviewed'):
+            learning['exercise']=None;current.update(status='practice_blocked',practice_error='新题参考解尚未完成复核，暂未发布。')
         else:
             current.update(status='waiting_practice',practice=practice);current.pop('practice_error',None)
+            current.pop('pending_practice',None)
     except (RuntimeError,ValueError):
         current['practice_error']='新题本次未能通过生成或核验，未发布替代题。可稍后重试或请教师核对。'
     return current.get('practice')

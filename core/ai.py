@@ -54,6 +54,62 @@ def ai_ready():
         return False
 
 
+def _read_config(name, default=''):
+    """环境变量 → st.secrets → 开发模式 .env 的读取顺序，供视觉 provider 复用。"""
+    injected = os.getenv(name)
+    if injected and injected.strip():
+        return injected.strip()
+    secret = secret_value(name)
+    if secret is not None and str(secret).strip():
+        return str(secret).strip()
+    if development_mode():
+        return str(dotenv_values(ROOT / '.env', interpolate=False).get(name) or default).strip()
+    return default
+
+
+def vision_config():
+    """可切换的视觉识别 provider 配置，默认仍为 DeepSeek，行为不变。
+
+    设置 VISION_PROVIDER=dashscope（或 qwen）后，视觉转写改走阿里云百炼
+    Qwen3.8-Flash；数学批改与推理继续走 DeepSeek，不受影响。
+    """
+    provider = _read_config('VISION_PROVIDER', 'deepseek').strip().lower()
+    if provider in ('dashscope', 'qwen', 'aliyun', 'bailian', 'qwen-vl'):
+        model = _read_config('DASHSCOPE_VISION_MODEL', 'qwen3.8-flash')
+        return {
+            'provider': 'dashscope',
+            'key': _read_config('DASHSCOPE_API_KEY'),
+            'base_url': _read_config('DASHSCOPE_BASE_URL', 'https://dashscope.aliyuncs.com/compatible-mode/v1').rstrip('/'),
+            'model': model,
+            'vision_model': model,
+            'timeout': _read_config('DASHSCOPE_TIMEOUT_SECONDS', '90'),
+            'retries': _read_config('DASHSCOPE_MAX_RETRIES', '0'),
+            'input_price': _read_config('DASHSCOPE_INPUT_PRICE_PER_MILLION'),
+            'output_price': _read_config('DASHSCOPE_OUTPUT_PRICE_PER_MILLION'),
+            'currency': _read_config('DASHSCOPE_PRICE_CURRENCY', 'CNY'),
+        }
+    cfg = dict(config())
+    cfg['provider'] = 'deepseek'
+    return cfg
+
+
+def _strip_image_detail(messages):
+    """Qwen-VL 不识别 OpenAI 的 image_url.detail 字段，发送前剥离。"""
+    cleaned = []
+    for message in messages:
+        content = message.get('content')
+        if isinstance(content, list):
+            blocks = []
+            for block in content:
+                image = block.get('image_url') if isinstance(block, dict) else None
+                if isinstance(block, dict) and block.get('type') == 'image_url' and isinstance(image, dict):
+                    block = dict(block, image_url={k: v for k, v in image.items() if k != 'detail'})
+                blocks.append(block)
+            message = dict(message, content=blocks)
+        cleaned.append(message)
+    return cleaned
+
+
 class ServiceUnavailable(RuntimeError):
     """Provider transport or service failure, distinct from invalid model data."""
 
@@ -69,11 +125,17 @@ class InvalidModelJSON(ValueError):
 def completion(messages, *, vision=False, json_output=False, max_tokens=1800, api_key=None,
                session_id='server-script', purpose='legacy', reasoning_effort=None):
     units = request_units(messages,max_tokens,output_limit=9500 if not vision and purpose in ('quick_grading','error_analysis') else 5000)
-    cfg = config() if api_key is None else {
-        'key': api_key.strip(), 'base_url': 'https://api.deepseek.com',
-        'model': 'deepseek-flash', 'vision_model': 'deepseek-flash',
-    }
+    if api_key is None:
+        cfg = vision_config() if vision else config()
+    else:
+        cfg = {
+            'key': api_key.strip(), 'base_url': 'https://api.deepseek.com',
+            'model': 'deepseek-flash', 'vision_model': 'deepseek-flash', 'provider': 'deepseek',
+        }
     if not cfg['key']:
+        if vision and cfg.get('provider') == 'dashscope':
+            raise RuntimeError('视觉识别已切换到阿里云百炼 Qwen3.8-Flash，但未配置 DASHSCOPE_API_KEY。'
+                               '请在环境变量中设置该 Key，或将 VISION_PROVIDER 改回 deepseek 继续使用 DeepSeek。')
         raise RuntimeError('AI 服务尚未就绪，请联系演示提供者；数学验证仍可使用。')
     target = urlparse(cfg['base_url'])
     if target.scheme != 'https' or not target.hostname or target.username or target.password or target.query or target.fragment:
@@ -85,6 +147,8 @@ def completion(messages, *, vision=False, json_output=False, max_tokens=1800, ap
     except (TypeError, ValueError):
         raise RuntimeError('服务端超时或重试配置无效。') from None
     model = cfg.get('vision_model', 'deepseek-flash') if vision else cfg.get('model', 'deepseek-flash')
+    if vision and cfg.get('provider') == 'dashscope':
+        messages = _strip_image_detail(messages)
     for attempt in range(retries + 1):
         if attempt:
             time.sleep(min(0.5 * 2 ** (attempt - 1), 2))

@@ -30,8 +30,19 @@ def _solutions(text,result,stage):
 def evidence(submission):
     result = {'tool': 'SymPy bounded evidence', 'status': 'not_applicable',
               'scope': '仅支持显式多项式求导或相邻四次以内实数多项式方程解集；不验证完整证明。', 'checks': []}
-    if submission.get('task_type') == 'derivative':
-        original = submission.get('tool_expression') or submission['question']
+    # Only route an explicit, fully parsable polynomial suffix. Never extract
+    # expressions from a proof, parameter problem, or arbitrary natural text.
+    explicit=None
+    if submission.get('task_type','general')=='general':
+        match=re.fullmatch(r'(?:求导数|求导)\s*[:：]?\s*(.{1,160})',submission['question'].strip())
+        if match:
+            try:
+                explicit=match[1].strip().removesuffix('。')
+                _parse(explicit)
+            except (ValueError,SyntaxError,TypeError,sp.PolynomialError):
+                explicit=None
+    if submission.get('task_type') == 'derivative' or explicit is not None:
+        original = explicit if explicit is not None else (submission.get('tool_expression') or submission['question'])
         original = re.sub(r'^(求导|求导数)[:：\s]*', '', original.strip())
         r = analyze({'student_id': submission['student_id'], 'question': original,
                      'student_answer': submission.get('answer', '')}).to_dict()

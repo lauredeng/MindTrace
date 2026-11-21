@@ -117,6 +117,10 @@ def test_four_hints_hypothesis_updates_and_self_report_not_mastery():
     assert l['hypothesis_history'] and l['hypotheses'][0]['status']=='supported'
 
 def exercise(*args,**kwargs):
+    if kwargs.get('purpose')=='reference_review':
+        from core.exercise_review import FIELDS
+        return {'verdict':'correct','independent_answer':'x=1',
+            'checks':dict.fromkeys(FIELDS,'pass'),'reason':'离线协议测试：由测试提供明确审题回执，不代表真实模型准确率。','issues':[]}
     return {'objective':'检查负数因子分配','relation_to_error':'两个括号项都要乘负数','structure_change':'外部正系数改为负数，要求分配与符号处理',
         'question':'解方程-2*(x-4)=6','reference_steps':['-2*x+8=6','-2*x=-2','x=1'],
         'answer':'x=1','topic':'综合应用与证明','task_type':'equation','tool_expression':'',

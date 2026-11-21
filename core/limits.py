@@ -23,29 +23,45 @@ def auto_resume(call, notify, *, max_wait=120, sleep=time.sleep):
     def request(*args, **kwargs):
         nonlocal remaining
         provider_retries=0
+        service_retries=0
         while True:
             try:
                 return call(*args, **kwargs)
             except UsageLimitError as exc:
+                failure=exc
                 delay=exc.retry_after
+                reason=exc.reason
                 if delay is None or not math.isfinite(delay) or delay>remaining:
+                    raise
+                if reason not in ('minute','busy','provider'):
                     raise
                 if exc.reason=='provider':
                     if provider_retries>=2:
                         raise
                     provider_retries+=1
-                delay=max(1,delay)
+            except RuntimeError as exc:
+                failure=exc
+                # Local import avoids ai -> limits -> ai at module import time.
+                from core.ai import ServiceUnavailable
+                if not isinstance(exc,ServiceUnavailable) or service_retries>=2:
+                    raise
+                delay=2 ** (service_retries+1)
                 if delay>remaining:
                     raise
-                remaining-=delay
-                seconds=int(delay)
-                while seconds>0:
-                    notify(exc.reason,seconds)
-                    sleep(1)
-                    seconds-=1
-                if delay%1:
-                    sleep(delay%1)
-                notify(exc.reason,0)
+                service_retries+=1
+                reason='service'
+            delay=max(1,delay)
+            if delay>remaining:
+                raise failure
+            remaining-=delay
+            seconds=int(delay)
+            while seconds>0:
+                notify(reason,seconds)
+                sleep(1)
+                seconds-=1
+            if delay%1:
+                sleep(delay%1)
+            notify(reason,0)
     return request
 
 

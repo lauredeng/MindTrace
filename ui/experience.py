@@ -10,7 +10,7 @@ from core import education as edu, classroom as store
 from ui.workbench import Runtime, heading, source_panel, status, message
 
 TEACHER = ['作业批改', '班级错误分析', '历史记录']
-STUDENT = ['AI解题与辅导', '我的错题本', '错因分析']
+STUDENT = ['AI解题与辅导', '我的错题本', '订正与复习', '学习画像', '错因分析']
 COMPAT = ['工作台首页','作业分析','旧版班级学情','教学任务','我的学习','拍题辅导','专项练习','学习档案']
 LEGACY = ['教师批量分析', '证据复核与统计', '学生辅导体验', '学习认知画像', '运行记录']
 PAGES = ['产品首页'] + TEACHER + STUDENT + ['高级设置','班级学情','AI 解题与辅导'] + COMPAT
@@ -24,6 +24,7 @@ def go(role, page, submission_id=None, task_id=None):
     st.session_state['experience_destination'] = (role, page)
     if submission_id:
         st.session_state['studio_selected_question'] = submission_id
+        if role=='学生学习空间':st.session_state['v12_sub_pending']=submission_id
     if role == '教师工作空间' and page == '作业分析':
         st.session_state['teacher_open_review'] = bool(submission_id)
     if task_id:
@@ -60,7 +61,8 @@ def navigation():
     page=st.session_state['experience_page']
     if page not in PAGES+LEGACY:page=options[0]
     icons={TEACHER[0]:':material/task_alt:',TEACHER[1]:':material/grid_view:',TEACHER[2]:':material/history:',
-        STUDENT[0]:':material/auto_awesome:',STUDENT[1]:':material/menu_book:',STUDENT[2]:':material/pie_chart:', '产品首页':':material/home:'}
+        'AI解题与辅导':':material/auto_awesome:','我的错题本':':material/menu_book:',
+        '订正与复习':':material/event_repeat:','学习画像':':material/insights:','错因分析':':material/pie_chart:', '产品首页':':material/home:'}
     with st.container(key='main_navigation'):
         for label in options:
             st.button(label,key='nav_'+label,icon=icons[label],type='primary' if page==label else 'tertiary',

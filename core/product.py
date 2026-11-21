@@ -31,6 +31,8 @@ def question_key(question):
     return digest(re.sub(r'\s+','',question))
 
 def item_key(sub):
+    if sub.get('canonical_question_id'):
+        return sub['canonical_question_id']
     if sub.get('question_id'):
         return sub['question_id']
     if sub.get('parent_question_no') and sub.get('subquestion_no'):
@@ -43,11 +45,21 @@ def category(value):
     return value
 
 def current_records(sub,key):
-    return [r for r in sub.get(key,[]) if r.get('reference_revision')==sub.get('reference_revision')]
+    if key == 'solutions':
+        return [r for r in sub.get(key, []) if solution_is_current(sub, r)]
+    return [r for r in sub.get(key,[]) if r.get('reference_revision')==sub.get('reference_revision')
+            and r.get('fingerprint')==sub['fingerprint'] and r.get('grading_revision')==sub.get('grading_revision')]
+
+
+def solution_is_current(sub, record):
+    """Unversioned legacy explanations remain history, never current evidence."""
+    return (record.get('material_fingerprint') == sub['fingerprint']
+            and record.get('grading_revision')==sub.get('grading_revision')
+            and record.get('reference_revision') == sub.get('reference_revision'))
 
 
 def latest(sub,key):
-    record = next((r for r in reversed(sub.get(key,[]) if key=='solutions' else current_records(sub,key)) if r.get('status')=='completed'
+    record = next((r for r in reversed(current_records(sub,key)) if r.get('status')=='completed'
                    and (key != 'solutions' or not math_tools.reference_conflicts(r.get('correction',{}).get('reference_tool',{})))),None)
     return guarded_quick(record) if key == 'quick_checks' and record else record
 
@@ -133,7 +145,7 @@ def quick_check(sub,call,force=False,*,reference=None):
     cached=latest(sub,'quick_checks')
     if cached and cached['fingerprint']==sub['fingerprint'] and not force and current_records(sub,'quick_checks')[-1]['status']=='completed':
         return cached
-    rec={'id':c.uid(),'created_at':c.now(),'fingerprint':sub['fingerprint'],'engine_version':QUICK_VERSION}
+    rec={'id':c.uid(),'created_at':c.now(),'fingerprint':sub['fingerprint'],'engine_version':QUICK_VERSION,'grading_revision':sub.get('grading_revision')}
     if sub.get('reference_revision'):rec['reference_revision']=sub['reference_revision']
     if reference:rec['reference_answer']=reference['answer']
     classroom_mode=sub.get('grading_policy')==CLASSROOM_POLICY
@@ -164,21 +176,21 @@ def quick_check(sub,call,force=False,*,reference=None):
                 sub['quick_checks'].append(rec)
                 return rec
         sources={'QUESTION':sub['question'],'ANSWER':sub['answer'],**{'S'+str(i):v for i,v in enumerate(sub['steps'],1)}}
-        answer_only=kind in ('选择题','填空题')
+        answer_only=kind in (*e.CHOICE_TYPES,'填空题')
         if classroom_mode and sub['answer'] and not re.search(r'证明|证得|求证|写出过程|说明理由|论证',sub['question']):
             answer_only=True
         prompt=QUICK_PROMPT
         if classroom_mode:
             prompt=prompt.replace('必要论证缺失判uncertain','卷面转写清楚且明确缺少必要论证时判incorrect；看不清或题干缺条件才判uncertain')
             prompt+='\n以answer_only字段为准。为true时核对最终答案，不要求过程，first_error_step填null；为false时引用实际步骤，步骤从1开始。'
-            if kind=='选择题':
+            if kind in e.CHOICE_TYPES:
                 prompt+=' 多选按选项集合判定，顺序与常见分隔符无关；可读的漏选或多选都判错。'
         if reference:
             prompt+='\n按已确认参考答案及评分依据批改。接受数学等价形式与有效替代证法；需要证明时须核对步骤。'
         grading_options={}
         token_limit=1800
         if classroom_mode:
-            objective=kind in ('选择题','填空题')
+            objective=kind in (*e.CHOICE_TYPES,'填空题')
             token_limit=2800 if objective else 5000
             grading_options={'retry_tokens':5200 if objective else 8500}
             if objective:grading_options['reasoning_effort']='low'
@@ -258,6 +270,7 @@ def quick_check(sub,call,force=False,*,reference=None):
             rec['category']=UNKNOWN
     except (RuntimeError,ValueError) as exc:
         rec.update(status='failed',error=str(exc),error_type=type(exc).__name__)
+        if isinstance(exc,UsageLimitError):rec.update(limit_reason=exc.reason,retry_after=exc.retry_after)
         if getattr(exc,'compact_retry',False):rec['compact_retry']=True
     sub['quick_checks'].append(rec)
     return rec
@@ -301,9 +314,10 @@ def deep_analyze(sub,call,force=False,*,teacher_only=False,reference=None):
     cached=next((r for r in reversed(current_records(sub,'analyses')) if r.get('engine_version')==DEEP_VERSION and r.get('status')=='completed'
                  and bool(r.get('teacher_only'))==teacher_only),None)
     q=latest(sub,'quick_checks')
-    if cached and not force and cached.get('quick_id')==(q or {}).get('id') and sub['analyses'][-1]['status']=='completed' and not math_tools.reference_conflicts(cached.get('correction',{}).get('reference_tool',{})) and not (teacher_only and cached.get('needs_review')):
+    if cached and not force and cached.get('quick_id')==(q or {}).get('id') and sub['analyses'][-1]['status']=='completed' and not math_tools.reference_conflicts(cached.get('correction',{}).get('reference_tool',{})):
         return cached
     rec={'id':c.uid(),'created_at':c.now(),'fingerprint':sub['fingerprint'],'engine_version':DEEP_VERSION,
+         'grading_revision':sub.get('grading_revision'),
          'quick_id':(q or {}).get('id'),'tool':math_tools.evidence(sub),'teacher_only':teacher_only}
     if sub.get('reference_revision'):rec['reference_revision']=sub['reference_revision']
     try:
@@ -328,6 +342,7 @@ def deep_analyze(sub,call,force=False,*,teacher_only=False,reference=None):
         rec.update(status='completed',needs_review=bool(rec['conflicts']) or rec['analysis']['overall']=='insufficient_evidence')
     except (RuntimeError,ValueError) as exc:
         rec.update(status='failed',error=str(exc),error_type=type(exc).__name__,conflicts=[])
+        if isinstance(exc,UsageLimitError):rec.update(limit_reason=exc.reason,retry_after=exc.retry_after)
         if getattr(exc,'compact_retry',False):rec['compact_retry']=True
     sub['analyses'].append(rec)
     return rec
@@ -338,7 +353,9 @@ def effective(w,sub):
     q=latest(sub,'quick_checks')
     a=e.latest_success(sub)
     review=c.latest_review(w,sub['id'])
-    if review and review.get('manual_grade') and review.get('fingerprint')==sub['fingerprint']:
+    if (review and review.get('manual_grade') and review.get('fingerprint')==sub['fingerprint']
+        and review.get('grading_revision')==sub.get('grading_revision')
+            and review.get('reference_revision')==sub.get('reference_revision')):
         return {'verdict':'incorrect' if review['is_error'] else 'correct','confirmed':True,
                 'basis':review['note'] or '教师改判。','first_error_step':None,'source_id':review['id']}
     # V1 reviews bind to a specific analysis; a newer quick check invalidates old decisions.
@@ -380,6 +397,8 @@ def create_batch(w,name,rows,source='image_confirmed',*,grading_policy=None,mate
         return existing
     batch={'id':c.uid(),'name':name,'created_at':c.now(),'submission_ids':[],'questions':[],
            'status':'ready','source':source,'import_fingerprint':fingerprint}
+    from core import identities
+    batch['roster']=identities.roster_snapshot(w,rows)
     if materials is not None:
         from core.uploads import reject_existing
         reject_existing(w,name,materials)
@@ -387,12 +406,13 @@ def create_batch(w,name,rows,source='image_confirmed',*,grading_policy=None,mate
     subs=[];seen=set();questions={}
     for row in rows:
         sub=e.normalize_submission(row,source,row.get('image_ref'),row.get('transcription',''),allow_unanswered=True)
-        qid=item_key(sub)
+        canonical=item_key(sub)
+        qid=digest([canonical,sub['question_no'],sub.get('question_type')])
         key=(sub['student_id'],qid)
         if key in seen:
             raise ValueError('同一批次同一学生同题出现多份作答，请保留确认的一份。')
         seen.add(key)
-        sub.update(batch_id=batch['id'],question_id=qid,quick_checks=[])
+        sub.update(batch_id=batch['id'],question_id=qid,canonical_question_id=canonical,quick_checks=[])
         if materials is not None:
             sub['source_pages']=row.get('source_pages')
         if grading_policy:
@@ -401,6 +421,7 @@ def create_batch(w,name,rows,source='image_confirmed',*,grading_policy=None,mate
         questions.setdefault(qid,{'id':qid,'question':sub['question'],'question_no':sub['question_no'],'topic':sub['topic'],
             'question_type':sub['question_type'],'parent_question_no':sub['parent_question_no'],'subquestion_no':sub['subquestion_no']})
     batch['questions']=list(questions.values())
+    identities.attach(batch,subs)
     c.commit(w,'batch-'+batch['id'],lambda draft:(draft['submissions'].extend(subs),draft['batches'].append(batch)))
     return next(b for b in w['batches'] if b['id']==batch['id'])
 
@@ -431,6 +452,8 @@ def save_references(w,batch_id,changes,expected,*,prepare=None,persist=None):
                 continue
             answer,rubric=answer_keys.validated(groups[key],answer,rubric)
             if old and (answer,rubric)==(old['answer'],old['rubric']):
+                if any(members.get(row['id'])==key and row.get('reference_revision')!=old['id'] for row in w['submissions']):
+                    updates[key]=entry
                 continue
             source='ai_confirmed' if draft and (answer,rubric)==(draft['answer'],draft['rubric']) else 'teacher'
             if len(entry.get('history',[]))>=30:
@@ -444,11 +467,8 @@ def save_references(w,batch_id,changes,expected,*,prepare=None,persist=None):
             affected={}
             for row in data['submissions']:
                 update=updates.get(members.get(row['id']))
-                if update:
+                if update and row.get('reference_revision')!=update['confirmed']['id']:
                     state=effective(data,row)
-                    review=c.latest_review(data,row['id'])
-                    if review and review.get('manual_grade') and state['confirmed']:
-                        continue
                     row['reference_revision']=update['confirmed']['id']
                     affected[row['id']]=state['source_id']
             for task in data['tasks']:
@@ -456,10 +476,11 @@ def save_references(w,batch_id,changes,expected,*,prepare=None,persist=None):
                     task['status']='needs_recheck'
             for entry in data['notebook']:
                 sid=entry['submission_id']
-                if affected.get(sid) and entry.get('source_id')==affected[sid]:
+                if sid in affected:
                     data['book_events'].append({'id':c.uid(),'entry_id':entry['id'],'action':'reference_revised',
                                                 'created_at':c.now(),'previous':deepcopy(entry)})
-                    entry.update(active_error=False,source_id=None,updated_at=c.now(),
+                    entry.update(active_error=False,source_id=None,evidence_status='awaiting_review',
+                                 first_error_step=None,updated_at=c.now(),
                                  correct_answer='参考答案已更新，等待本题重新批改。',reference_steps=[],supplements=[],
                                  uncertainties=[],reference_tool={'status':'not_applicable'})
                     entry.pop('sync_fingerprint',None)
@@ -504,7 +525,7 @@ def batch_execution(w,batch_id):
     batch=next(b for b in w['batches'] if b['id']==batch_id)
     subs={s['id']:s for s in w['submissions']}
     out=dict(total=len(batch['submission_ids']),complete=0,quick_completed=0,
-             deep_required=0,deep_completed=0,failed=0,blocked=0,needs_transcription=0)
+             deep_required=0,deep_completed=0,failed=0,blocked=0,needs_transcription=0,needs_review=0)
     attempted=False
     for sid in batch['submission_ids']:
         sub=subs.get(sid)
@@ -531,8 +552,9 @@ def batch_execution(w,batch_id):
         a=next((r for r in reversed(current_records(sub,'analyses'))
                 if r.get('engine_version')==DEEP_VERSION and r.get('quick_id')==q['id']
                 and r.get('fingerprint')==sub['fingerprint']),None)
-        if a and a.get('status')=='completed' and not math_tools.reference_conflicts(a.get('correction',{}).get('reference_tool',{})) and not (a.get('teacher_only') and a.get('needs_review')):
+        if a and a.get('status')=='completed' and not math_tools.reference_conflicts(a.get('correction',{}).get('reference_tool',{})):
             out['deep_completed']+=1;out['complete']+=1
+            if a.get('needs_review'):out['needs_review']+=1
         elif a and a.get('status')=='failed':
             out['blocked' if a.get('error_type')=='UsageLimitError' else 'failed']+=1
     out['remaining']=out['total']-out['complete']
@@ -556,18 +578,17 @@ def run_batch(w,batch_id,call,progress=None,force=False,*,_prepare=None,_persist
         if submission_id is not None and submission_id not in batch['submission_ids']:
             raise ValueError('所选作答不属于当前批次。')
         selected=None if submission_id is None else [submission_id]
-        result=_run_batch(w,batch_id,call,progress,force,submission_ids=selected)
-        if _persist is not None:
-            _persist()
+        result=_run_batch(w,batch_id,call,progress,force,submission_ids=selected,checkpoint=_persist)
         return result
 
 
-def _run_batch(w,batch_id,call,progress=None,force=False,*,submission_ids=None):
+def _run_batch(w,batch_id,call,progress=None,force=False,*,submission_ids=None,checkpoint=None):
     ensure(w)
     batch=next(b for b in w['batches'] if b['id']==batch_id)
     ids=list(batch['submission_ids']) if submission_ids is None else submission_ids
     batch['status']='running'
     batch.pop('pause_reason',None)
+    if checkpoint:checkpoint()
     stopped=False
     service_failures=0
     keys={entry['confirmed']['id']:entry['confirmed'] for entry in batch.get('answer_keys',{}).values()
@@ -587,7 +608,7 @@ def _run_batch(w,batch_id,call,progress=None,force=False,*,submission_ids=None):
         ids.sort(key=priority)
     objective_results={}
     def objective_key(sub):
-        if (sub.get('grading_policy')==CLASSROOM_POLICY and sub.get('question_type') in ('选择题','填空题')
+        if (sub.get('grading_policy')==CLASSROOM_POLICY and sub.get('question_type') in (*e.CHOICE_TYPES,'填空题')
             and sub['answer'] and not unreadable(sub) and not is_blank(sub)):
             return (sub['question'],sub['answer'],tuple(sub['steps']),sub['question_type'],sub['topic'],
                     sub['task_type'],sub['tool_expression'],sub.get('reference_revision'))
@@ -619,6 +640,7 @@ def _run_batch(w,batch_id,call,progress=None,force=False,*,submission_ids=None):
                 previous=objective_results.get(key)
                 if previous and not (q and q.get('status')=='completed' and q.get('fingerprint')==sub['fingerprint']):
                     rec=dict(deepcopy(previous),id=c.uid(),created_at=c.now(),fingerprint=sub['fingerprint'],
+                             grading_revision=sub.get('grading_revision'),
                              reused_from=previous['id'])
                     sub['quick_checks'].append(rec)
                 else:
@@ -632,6 +654,10 @@ def _run_batch(w,batch_id,call,progress=None,force=False,*,submission_ids=None):
                     service_failures+=1
                 elif rec.get('status')=='completed':
                     service_failures=0
+                # Persist evidence and its notebook projection before UI callbacks
+                # or a subsequent paid request can interrupt this run.
+                sync_notebook(w,sid)
+                if checkpoint:checkpoint()
                 if progress:progress(stage,i+1,len(ids))
             if rec.get('error_type')=='UsageLimitError' or service_failures>=2:
                 stopped=True;batch['pause_reason']=rec.get('error','请求受到限制，请稍后继续。');break
@@ -641,6 +667,7 @@ def _run_batch(w,batch_id,call,progress=None,force=False,*,submission_ids=None):
     batch['last_run_at']=c.now()
     for sid in ids:
         sync_notebook(w,sid)
+    if checkpoint:checkpoint()
     return {'paused':stopped,'questions':len(ids),**batch_execution(w,batch_id)}
 
 
@@ -675,9 +702,17 @@ def regrade_transcription(w,batch_id,submission_id,expected_fingerprint,steps,an
                        fingerprint=digest([normalized['fingerprint'],revision_id]),
                        quick_checks=[],analyses=[],solutions=[])
             if row.get('reference_revision') and row['question']!=history[-1]['question']:
-                _,new_members=reference_catalog(draft,batch)
-                if old_members.get(submission_id)!=new_members.get(submission_id):
-                    row.pop('reference_revision',None)
+                row.pop('reference_revision',None)
+            if row['question']!=history[-1]['question']:
+                from core import identities
+                row.update(assignment_question_id=c.uid(),question_revision=identities.revision(row),
+                           question_id=digest([row['question'],row['question_no'],revision_id]))
+                target=next(b for b in draft['batches'] if b['id']==batch_id)
+                target['questions'].append({k:deepcopy(row[k]) for k in
+                    ('question','question_no','question_type','parent_question_no','subquestion_no','topic',
+                     'assignment_question_id','question_revision')} | {'id':row['question_id']})
+                used={s.get('question_id') for s in draft['submissions'] if s['id'] in target['submission_ids']}
+                target['questions']=[q for q in target['questions'] if q['id'] in used]
             if row.get('submission_status')=='unreadable':
                 row['submission_status']='submitted'
             for task in draft['tasks']:
@@ -780,7 +815,7 @@ def error_groups(w,batch_id=None):
 
 def correction_for(sub):
     a=current_deep(sub)
-    sol=next((r for r in reversed(sub.get('solutions',[])) if r.get('status')=='completed' and r.get('mode')=='full' and not math_tools.reference_conflicts(r.get('correction',{}).get('reference_tool',{}))),None)
+    sol=next((r for r in reversed(current_records(sub,'solutions')) if r.get('status')=='completed' and r.get('mode')=='full' and not math_tools.reference_conflicts(r.get('correction',{}).get('reference_tool',{}))),None)
     if sol:
         return sol['correction']
     return (a or {}).get('correction')
@@ -802,10 +837,23 @@ def sync_notebook(w,submission_id,manual=False,chosen_category=None):
                 w['book_events'].append({'id':c.uid(),'entry_id':entry['id'],'action':'link_source','created_at':c.now()})
             return entry
     if state['verdict']!='incorrect' and not manual:
-        if entry and state['confirmed'] and state['verdict']=='correct' and (entry.get('active_error',True) or entry.get('resolved_by')!=sub['id']):
-            entry['active_error']=False;entry['resolved_by']=sub['id']
+        evidence_status='corrected' if state['verdict']=='correct' else 'awaiting_review'
+        if entry and (entry.get('active_error',True) or entry.get('evidence_status')!=evidence_status
+                      or entry.get('source_id')!=state['source_id']):
+            before=deepcopy(entry)
+            entry.update(active_error=False,evidence_status=evidence_status,source_id=state['source_id'],
+                         first_error_step=None,updated_at=c.now())
+            entry.pop('sync_fingerprint',None)
+            if evidence_status=='corrected':
+                entry['resolved_by']=sub['id']
+            else:
+                entry.pop('resolved_by',None)
+                entry.update(correct_answer='当前判定待核对，原讲解仅保留在历史中。',reference_steps=[],
+                             supplements=[],uncertainties=[],reference_tool={'status':'not_applicable'})
             if sub['id'] not in entry['source_ids']:entry['source_ids'].append(sub['id'])
-            w['book_events'].append({'id':c.uid(),'entry_id':entry['id'],'action':'source_corrected','created_at':c.now(),'source_id':state['source_id']})
+            w['book_events'].append({'id':c.uid(),'entry_id':entry['id'],
+                'action':'source_corrected' if evidence_status=='corrected' else 'source_unverified',
+                'created_at':c.now(),'source_id':state['source_id'],'previous':before})
         return entry
     q=latest(sub,'quick_checks')
     ai_category=(correction or {}).get('category',(q or {}).get('category',UNKNOWN))
@@ -823,7 +871,8 @@ def sync_notebook(w,submission_id,manual=False,chosen_category=None):
          'reference_tool':deepcopy((correction or {}).get('reference_tool',{'status':'not_applicable'})),
          'knowledge_points':(correction or {}).get('knowledge_points',(q or {}).get('knowledge_points',[])),
          'ai_category':ai_category,'ai_category_basis':(correction or {}).get('category_basis',(q or {}).get('category_basis','证据不足')),
-         'active_error':state['verdict']=='incorrect' or manual,'origin':sub['source']}
+         'active_error':state['verdict']=='incorrect' or manual,'origin':sub['source'],
+         'evidence_status':'confirmed' if state['confirmed'] else 'ai_suggested'}
     # Redacting a shared full-page image for students must not look like a new diagnosis.
     sync_fingerprint=digest({k:v for k,v in new.items() if k!='image_ref'})
     if entry and entry.get('sync_fingerprint')==sync_fingerprint and not manual:
@@ -836,6 +885,7 @@ def sync_notebook(w,submission_id,manual=False,chosen_category=None):
         w['notebook'].append(entry)
     before=deepcopy(entry)
     entry.update(new)
+    entry.pop('resolved_by',None)
     entry['sync_fingerprint']=sync_fingerprint
     if sub['id'] not in entry['source_ids']:
         entry['source_ids'].append(sub['id'])
@@ -889,11 +939,12 @@ def solve_question(sub,mode,call,force=False,cause=None):
     if mode not in ('hint','steps','full'):
         raise ValueError('解题方式无效。')
     sub.setdefault('solutions',[])
-    fingerprint=digest([sub['fingerprint'],mode,cause])
+    fingerprint=digest([sub['fingerprint'],sub.get('reference_revision'),sub.get('grading_revision'),mode,cause])
     cached=next((r for r in reversed(sub['solutions']) if r.get('fingerprint')==fingerprint and r['status']=='completed'),None)
     if cached and not force and not math_tools.reference_conflicts(cached.get('correction',{}).get('reference_tool',{})):
         return cached
-    rec={'id':c.uid(),'mode':mode,'fingerprint':fingerprint,'created_at':c.now()}
+    rec={'id':c.uid(),'mode':mode,'fingerprint':fingerprint,'created_at':c.now(),
+         'material_fingerprint':sub['fingerprint'],'reference_revision':sub.get('reference_revision'),'grading_revision':sub.get('grading_revision')}
     try:
         p=e.mapping(call(SOLUTION_PROMPT,json.dumps({k:sub[k] for k in ('question','steps','answer','topic')} |
             {'mode':mode,'student_selected_cause':cause,'diagnosis':(e.latest_success(sub) or {}).get('analysis'),
@@ -904,6 +955,7 @@ def solve_question(sub,mode,call,force=False,cause=None):
             correction=validate_correction(p.get('correction'),sub,mode))
     except (RuntimeError,ValueError) as exc:
         rec.update(status='failed',error=str(exc),error_type=type(exc).__name__)
+        if isinstance(exc,UsageLimitError):rec.update(limit_reason=exc.reason,retry_after=exc.retry_after)
     sub['solutions'].append(rec)
     return rec
 

@@ -309,3 +309,59 @@ h1 {font-size:1.75rem!important;}
 
 .st-key-student_composer [data-testid="stChatInput"]{margin-top:5px}
 .st-key-student_composer [data-testid="stChatInput"] textarea{min-height:58px}
+
+/* Product design pilot: restrained depth, consistent reading edges and keyboard parity. */
+:root{--mt-ink:#202c46;--mt-muted:#64728d;--mt-line:#e4eaf5;--mt-blue:#365bd7}
+.landing-classic{display:grid;grid-template-columns:1.3fr 1fr;align-items:center;gap:48px;padding:30px 0 34px;max-width:none;width:100%}
+.landing-classic h1{font-family:"Source Han Serif SC","Noto Serif SC","Microsoft YaHei",serif!important;font-size:clamp(30px,3.4vw,46px)!important;line-height:1.35!important;font-weight:750!important;letter-spacing:.015em!important;margin:22px 0 12px!important;color:var(--mt-ink)}
+.landing-classic .landing-copy>p{color:var(--mt-muted);font-size:15px;line-height:1.9;margin:18px 0 0}
+.landing-overview{background:linear-gradient(145deg,#f2f5ff,#fafbff 65%,#f1edff);border:1px solid #e6eafa;border-radius:24px;padding:27px 26px;position:relative;overflow:hidden}
+.landing-overview:after{content:"";position:absolute;right:-35px;top:-50px;width:150px;height:150px;border:24px solid #6478db08;border-radius:50%;pointer-events:none}
+.overview-kicker{color:#67779b;font-size:12px;letter-spacing:.09em;font-weight:600}
+.journey-step{display:flex;gap:16px;align-items:flex-start;position:relative;margin-top:22px}
+.journey-step>span{font-size:12px;color:#4561c1;background:#e6ecff;border-radius:10px;padding:8px;line-height:1;min-width:32px;text-align:center}
+.journey-step b{font-size:15px;color:#344666;font-weight:650}
+.journey-step p{font-size:13px;color:#73809a;line-height:1.6;margin:3px 0 0}
+:is(.st-key-v11_surface_home_teacher,.st-key-v11_surface_home_student){border-radius:22px!important;box-shadow:0 8px 24px #354f9910;}
+.st-key-v11_surface_home_student{background:linear-gradient(145deg,#f8f9ff,#f1f3ff)!important}
+:is(.st-key-home_select_teacher,.st-key-home_select_student) button{min-height:208px;padding:30px 28px!important}
+:is(.st-key-home_select_teacher,.st-key-home_select_student) button strong{font-size:22px!important;line-height:1.55!important;letter-spacing:-.015em}
+:is(.st-key-home_select_teacher,.st-key-home_select_student) button p{font-size:15px!important;line-height:1.8!important;margin-bottom:10px!important}
+:is(.st-key-v11_surface_home_teacher,.st-key-v11_surface_home_student) :is(.st-key-home_enter_teacher,.st-key-home_enter_student) button{min-height:62px;padding:15px 28px!important}
+.st-key-home_role_grid :is(.st-key-v11_surface_home_teacher,.st-key-v11_surface_home_student):focus-within{outline:3px solid #9fb5ff;outline-offset:4px;--role-ink:#fff;--role-muted:#eef3ff;--role-accent:#fff;--role-line:#ffffff3d;--role-hover:#ffffff1a;background:linear-gradient(118deg,#304cbd,#4568cc 58%,#5176d5)!important}
+:is(.st-key-home_select_teacher,.st-key-home_select_student) button:focus-visible{outline:none!important}
+.review-case-header{display:flex;justify-content:space-between;align-items:center;gap:16px;padding:4px 0 15px;border-bottom:1px solid var(--mt-line);margin:12px 0 18px;scroll-margin-top:88px}
+.review-case-header h3{font-size:19px!important;line-height:1.5!important;margin:0!important;color:var(--mt-ink)}
+.review-case-header p{font-size:13px;color:var(--mt-muted);margin:5px 0 0}
+.review-section-label{font-size:12px;font-weight:650;letter-spacing:.06em;color:#6a7b9b;margin:0 0 14px}
+.st-key-evidence_workspace [data-testid="stVerticalBlockBorderWrapper"]{border-radius:18px}
+.st-key-evidence_workspace [data-testid="stTabs"]{margin-top:12px}
+[class*="st-key-case_navigation_"] button{margin-top:26px}
+@media(max-width:1000px){.landing-classic{gap:24px}.landing-overview{padding:23px 20px}.landing-classic h1{font-size:34px!important}}
+@media(max-width:700px){.landing-classic{grid-template-columns:1fr;padding:12px 0 24px;gap:24px}.landing-classic h1{font-size:32px!important;margin-top:16px!important}.landing-overview{padding:20px}.journey-step{margin-top:16px}:is(.st-key-home_select_teacher,.st-key-home_select_student) button{min-height:180px;padding:24px!important}.st-key-home_role_grid{padding:4px}}
+@media(prefers-reduced-motion:no-preference){.st-key-home_role_grid :is(.st-key-v11_surface_home_teacher,.st-key-v11_surface_home_student):is(:hover,:focus-within){--role-transform:translateY(-4px) scale(1.018)}}
+@media(prefers-reduced-motion:reduce){.st-key-home_role_grid :is(.st-key-v11_surface_home_teacher,.st-key-v11_surface_home_student){transform:none!important;transition:none!important}}
+@media(max-width:700px){[class*="st-key-case_navigation_"] [data-testid="stHorizontalBlock"]{flex-wrap:wrap!important}[class*="st-key-case_navigation_"] [data-testid="stColumn"]:first-child{min-width:100%!important}[class*="st-key-case_navigation_"] button{margin-top:0}}
+
+/* Learning loop: compact mobile metrics keep the first action in reach. */
+.st-key-learning_metrics { margin: 8px 0 14px; }
+@media (max-width: 640px) {
+ .st-key-learning_metrics [data-testid="stHorizontalBlock"] { flex-wrap: nowrap !important; gap: 8px !important; }
+ .st-key-learning_metrics [data-testid="stColumn"] { min-width: 0 !important; width: 0 !important; flex: 1 1 0 !important; }
+ .st-key-learning_metrics .academic-metric { padding: 14px 10px !important; min-height: 106px !important; border-radius: 16px; }
+ .st-key-learning_metrics .metric-top { font-size: 11px; gap: 4px; }
+ .st-key-learning_metrics .metric-symbol { display: none; }
+ .st-key-learning_metrics .metric-number { font-size: 28px; margin: 7px 0; }
+ .st-key-learning_metrics .metric-detail { display: none; }
+}
+
+.learning-chart { border: 1px solid #e4e9f7; background: linear-gradient(120deg,#f8faff,#fff); border-radius: 20px; padding: 24px; margin: 12px 0; }
+.learning-legend { display: flex; gap: 20px; flex-wrap: wrap; margin-bottom: 26px; color: #69768f; font-size: 12px; }
+.learning-legend span { display: inline-flex; align-items: center; gap: 7px; }
+.learning-legend i { width: 9px; height: 9px; border-radius: 3px; }
+.learning-bar-row { display: grid; grid-template-columns: 140px 1fr 50px; gap: 20px; align-items: center; margin: 18px 0; }
+.learning-bar-row b { font-size: 13px; color: #35425f; }
+.learning-bar-row > span { color: #8b96af; font-size: 12px; text-align: right; }
+.learning-bar-track { height: 20px; border-radius: 6px; background: #edf0f8; display: flex; overflow: hidden; }
+.learning-bar-track i { display: block; height: 100%; }
+@media(max-width:640px) { .learning-chart { padding: 18px 14px; } .learning-bar-row { grid-template-columns: 85px 1fr 35px; gap: 8px; } .learning-legend { gap: 12px; font-size: 11px; } }

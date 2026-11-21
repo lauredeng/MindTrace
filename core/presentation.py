@@ -24,7 +24,7 @@ def hierarchy(item):
 def record_state(w,sub,*,automatic=False):
     if automatic:
         manual=c.latest_review(w,sub['id'])
-        if manual and manual.get('manual_grade') and manual.get('fingerprint')==sub['fingerprint'] and not p.is_blank(sub):
+        if manual and manual.get('manual_grade') and manual.get('fingerprint')==sub['fingerprint'] and manual.get('reference_revision')==sub.get('reference_revision') and manual.get('grading_revision')==sub.get('grading_revision') and not p.is_blank(sub):
             return 'incorrect' if manual['is_error'] else 'correct'
     raw='\n'.join([sub['question'],*sub['steps'],sub['answer']])
     if sub.get('submission_status')=='unreadable' or '[无法辨认]' in raw:
@@ -74,6 +74,9 @@ def shared_question_keys(batch, records):
             continue
         group_id=p.digest(['shared_pdf_question',batch['id'],key])
         mapped.update((sub['id'],group_id) for sub in members)
+    for sub in records:
+        if sub.get('assignment_question_id') and sub['id'] not in mapped:
+            mapped[sub['id']]=sub['assignment_question_id']
     return mapped
 
 
@@ -85,7 +88,7 @@ def heatmap_rows(w,batch_id,*,automatic=False):
     chosen={(shared.get(sub['id'],p.item_key(sub)),sub['student_id']):sub for sub in records}
     used={qid for qid,_ in chosen}
     replaced={p.item_key(sub) for sub in records if sub['id'] in shared}-used
-    questions={q['id']:q for q in batch['questions'] if q['id'] not in replaced}
+    questions={q['id']:q for q in batch['questions'] if q['id'] not in replaced and q['id'] in used}
     for (qid,_),sub in chosen.items():
         questions.setdefault(qid,dict(sub,id=qid))
     output=[]
@@ -105,7 +108,7 @@ def heatmap_rows(w,batch_id,*,automatic=False):
         output.append({'id':qid,'label':label,'question':q['question'],'question_type':kind(q),
             'parent':parent,'child':child,'correct':counts['correct'],'errors':errors,
             'valid':valid,'pending':counts['pending'],'waiting':waiting,'not_submitted':counts['not_submitted']+(0 if automatic else absent),
-            'unreadable':counts['unreadable'],'ratio':errors/valid if valid else None,
+            'missing':absent,'unreadable':counts['unreadable'],'ratio':errors/valid if valid else None,
             'submission_ids':[s['id'] for s in records]})
     return sorted(output,key=sort_key)
 
@@ -128,7 +131,8 @@ def batch_summary(w,batch_id,*,automatic=False,rows=None):
     execution=p.batch_execution(w,batch_id)
     return {'execution':execution,'correctness':correct/valid if valid else None,'correct_count':correct,'valid_count':valid,
         'submitted_students':len(students),'average':average,'max_score':scores.get('max_score') if scores else None,
-        'status':{'ready':'等待批改','partial':'批改部分完成','failed':'批改失败','paused':'批改已暂停','processed':'批改已完成'}[execution['status']]}
+        'status':('已处理 · 待教师复核' if execution['status']=='processed' and execution['needs_review'] else
+                  {'ready':'等待批改','partial':'批改部分完成','failed':'批改失败','paused':'批改已暂停','processed':'批改已完成'}[execution['status']])}
 
 def save_scores(w,batch_id,values,max_score):
     if type(max_score) not in (int,float) or not math.isfinite(max_score) or max_score<=0:
@@ -158,7 +162,9 @@ def update_types(w,batch_id,rows):
         q=next(q for q in batch['questions'] if q['id']==row['id'])
         q.update({k:v for k,v in row.items() if k!='id'})
         for sub in w['submissions']:
-            if sub['id'] in batch['submission_ids'] and p.item_key(sub)==row['id']:
+            if sub['id'] in batch['submission_ids'] and sub.get('question_id',p.item_key(sub))==row['id']:
+                if any(sub.get(k)!=value for k,value in row.items() if k!='id'):
+                    sub['grading_revision']=c.uid()
                 sub.update({k:v for k,v in row.items() if k!='id'})
     w['events'].append({'id':c.uid(),'command_id':'question-metadata-'+c.uid(),'created_at':c.now(),'previous':before})
 
@@ -209,7 +215,9 @@ def override_grade(w,submission_id,verdict,note):
     review={'id':c.uid(),'submission_id':submission_id,'analysis_id':result.get('id'),
             'decision':'modify','label':'教师改判','note':note,'knowledge_points':[],
             'first_error_step':None,'is_error':verdict=='incorrect','created_at':c.now(),
-            'manual_grade':True,'fingerprint':sub['fingerprint']}
+            'manual_grade':True,'fingerprint':sub['fingerprint'],
+            'grading_revision':sub.get('grading_revision'),
+            'reference_revision':sub.get('reference_revision')}
     c.commit(w,'override-'+review['id'],lambda draft:draft['reviews'].append(review))
     return review
 

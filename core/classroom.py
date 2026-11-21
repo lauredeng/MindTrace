@@ -14,9 +14,12 @@ from core.records import validate_links
 # Evidence histories grow faster than submissions. Never silently truncate them.
 CAPACITIES = {'submissions':2000,'reviews':12000,'tasks':4000,'learning':4000,'attempts':16000,
               'events':20000,'usage':20000,'batches':2000,'notebook':2000,'book_events':20000,'study_sessions':4000}
+LEARNING_COLLECTIONS=('correction_attempts','correction_reviews','learning_events','review_units','review_events')
+CAPACITIES.update({key:20000 for key in LEARNING_COLLECTIONS})
 CAPACITY_LABELS = {'submissions':'作答材料','reviews':'教师复核','tasks':'学习任务','learning':'学习过程',
                    'attempts':'练习记录','events':'操作历史','usage':'服务使用记录','batches':'作业批次',
                    'notebook':'错题记录','book_events':'错题修订历史','study_sessions':'辅导记录'}
+CAPACITY_LABELS.update(dict(zip(LEARNING_COLLECTIONS,('订正作答','订正复核','学习事件','复习计划','复习记录'))))
 
 
 def capacity_status(workspace):
@@ -35,7 +38,8 @@ def uid():
 def new_workspace():
     return {'schema_version': 1, 'id': uid(), 'revision': 0, 'storage_version': 0, 'submissions': [],
             'reviews': [], 'tasks': [], 'learning': [], 'attempts': [], 'events': [], 'usage': [],
-            'batches': [], 'notebook': [], 'book_events': [], 'study_sessions': []}
+            'batches': [], 'notebook': [], 'book_events': [], 'study_sessions': [],
+            **{key:[] for key in LEARNING_COLLECTIONS}}
 
 
 def validate_workspace(data):
@@ -44,7 +48,7 @@ def validate_workspace(data):
     if not isinstance(data.get('id'),str) or not 0<len(data['id'])<=100 or type(data.get('revision')) is not int or data['revision']<0:
         raise ValueError('工作区编号或修订版本无效。')
     for key,limit in CAPACITIES.items():
-        if key not in data and key in ('batches', 'notebook', 'book_events', 'study_sessions'):
+        if key not in data and key in ('batches', 'notebook', 'book_events', 'study_sessions',*LEARNING_COLLECTIONS):
             continue
         if not isinstance(data.get(key), list):
             raise ValueError(CAPACITY_LABELS[key]+'格式无效。')
@@ -61,13 +65,15 @@ def validate_workspace(data):
             parse_roster(' '.join(roster))!=roster):
             raise ValueError('班级学号名单格式无效。')
     validate_links(data)
+    from core.learning_validation import validate_learning
+    validate_learning(data)
     # No config or secret objects are part of this schema.
     clean = {key: deepcopy(data[key]) for key in ('schema_version', 'id', 'revision', 'submissions', 'reviews', 'tasks', 'learning', 'attempts', 'events', 'usage')}
     generation = data.get('storage_version', 0)
     if type(generation) is not int or generation < 0:
         raise ValueError('存储版本无效。')
     clean['storage_version'] = generation
-    for key in ('batches', 'notebook', 'book_events', 'study_sessions'):
+    for key in ('batches', 'notebook', 'book_events', 'study_sessions',*LEARNING_COLLECTIONS):
         clean[key] = deepcopy(data.get(key, []))
     if 'student_roster' in data:clean['student_roster']=list(data['student_roster'])
     return clean
@@ -88,6 +94,10 @@ def commit(workspace, command_id, operation):
 
 def save(workspace, path=None):
     target = Path(path) if path else DATA_DIR / 'classroom_v1.json'
+    if os.getenv('MINDTRACE_DATABASE','').strip():
+        from core.background import configured_repository
+        configured_repository().save(workspace,str(target.resolve()))
+        return
     with LOCK:
         current = load_runs(target)
         if current and (current[0].get('id') != workspace['id'] or current[0].get('storage_version', 0) != workspace.get('storage_version', 0)):
@@ -100,6 +110,15 @@ def save(workspace, path=None):
 
 def load(path=None):
     target = Path(path) if path else DATA_DIR / 'classroom_v1.json'
+    if os.getenv('MINDTRACE_DATABASE','').strip():
+        from core.background import configured_repository
+        repository=configured_repository()
+        saved=repository.load(scope=str(target.resolve()))
+        if saved is not None:return saved
+        if target.exists():
+            repository.import_json(target,scope=str(target.resolve()))
+            return repository.load(scope=str(target.resolve()))
+        return new_workspace()
     with LOCK:
         rows = load_runs(target)
     if not rows:

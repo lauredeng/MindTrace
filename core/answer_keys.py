@@ -45,8 +45,9 @@ def choice(value):
 def compare(kind, answer, expected, *, approximate=False, has_rubric=False):
     if not answer:
         return None
-    if kind=='选择题':
+    if kind in e.CHOICE_TYPES:
         actual,key=choice(answer),choice(expected)
+        if kind=='单选题' and key and len(key)!=1:return None
         return actual==key if actual and key else None
     if kind!='填空题':
         return None
@@ -71,8 +72,10 @@ def compare(kind, answer, expected, *, approximate=False, has_rubric=False):
 def validated(sub, answer, rubric):
     answer=e.text(answer,2000,'参考答案')
     rubric=e.text(rubric,2000,'评分依据',optional=True)
-    if sub['question_type']=='选择题' and not choice(answer):
+    if sub['question_type'] in e.CHOICE_TYPES and not choice(answer):
         raise ValueError('选择题参考答案请填写完整选项，例如 AC。')
+    if sub['question_type']=='单选题' and len(choice(answer))!=1:
+        raise ValueError('单选题参考答案必须只有一个选项。')
     if math_tools.reference_conflicts(math_tools.evidence(dict(sub,answer=answer,steps=[]))):
         raise ValueError('参考答案与本地数学核验证据冲突，请先核对。')
     return answer,rubric
@@ -89,7 +92,7 @@ def generate(sub,call,*,compact_only=False):
     result=e.mapping(call_grading(call,PROMPT,
         {'question':sub['question'],'question_type':sub['question_type']},
         'reference_answer',3400,retry_tokens=5000,compact_only=compact_only,
-        reasoning_effort='low' if sub['question_type'] in ('选择题','填空题') else None))
+        reasoning_effort='low' if sub['question_type'] in (*e.CHOICE_TYPES,'填空题') else None))
     if type(result.get('needs_review')) is not bool:
         raise ValueError('参考答案状态无效。')
     if result['needs_review']:

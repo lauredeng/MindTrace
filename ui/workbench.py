@@ -79,10 +79,11 @@ class Runtime:
     def prepare_agent(self):
         return self.prepare_workspace()
 
-    def persist(self):
+    def persist(self, *, strict=False):
         known = {e['id'] for e in self.w['usage']}
         self.w['usage'].extend(e for e in for_session(self.session) if e['id'] not in known)
         if not self.shared:
+            if self.access and self.w==self.before:return
             try:
                 if self.access:
                     from core import collaboration as collab
@@ -91,6 +92,8 @@ class Runtime:
                     self.before=deepcopy(self.w);st.session_state['collab_snapshot']=deepcopy(self.w)
                 else:store.save(self.w)
             except (OSError, ValueError) as exc:
+                if strict:
+                    raise RuntimeError('进度保存失败，已停止后续批改。当前页面保留已有结果，请先下载备份，再处理存储问题。') from None
                 if self.access:
                     st.error('课堂保存未完成，未覆盖其他人的记录。请先复制当前内容，刷新课堂后重试。');st.stop()
                 else:st.warning('页面数据仍在，但本机保存失败，请下载备份。')
@@ -98,14 +101,31 @@ class Runtime:
     def image(self, ref):
         if not ref:
             return None
+        from core import backend_client
+        if self.access and backend_client.enabled():
+            if ref not in st.session_state.studio_images:
+                data=backend_client.request('GET','/assets/'+ref,code=self.access['code'],binary=True)
+                if data:st.session_state.studio_images[ref]=data
+            return st.session_state.studio_images.get(ref)
         return st.session_state.studio_images.get(ref) or (None if self.shared else store.read_image(ref,collab.image_directory(self.access['code']) if self.access else None))
 
     def keep_image(self, data):
         ref = hashlib.sha256(data).hexdigest()
+        from core import backend_client
+        if self.access and backend_client.enabled():
+            backend_client.request('PUT','/assets/'+ref,code=self.access['code'],content=data)
+            st.session_state.studio_images[ref]=data
+            return ref
         st.session_state.studio_images[ref] = data
         if not self.shared:
+            repository=None
+            if self.access:
+                from core.background import configured_repository
+                repository=configured_repository()
+                if repository:repository.stage_asset(self.w['id'],ref,len(data),owner=self.assigned_student or 'teacher')
             try:
                 store.attach_image(data,collab.image_directory(self.access['code']) if self.access else None)
+                if repository:repository.ready_asset(self.w['id'],ref)
             except OSError:
                 st.warning('原图仍可在当前会话对照，但磁盘保存失败，请自行保留匿名原图。')
         return ref
@@ -113,6 +133,11 @@ class Runtime:
     def upload_evidence(self, ref, *, original=False, data=None):
         if self.assigned_student:
             raise ValueError('原始上传文件仅对教师开放。')
+        from core import backend_client
+        if self.access and backend_client.enabled():
+            path=('/originals/' if original else '/assets/')+ref
+            return backend_client.request('PUT' if data is not None else 'GET',path,
+                code=self.access['code'],content=data,binary=data is None)
         directory=collab.image_directory(self.access['code']) if self.access else store.DATA_DIR/'classroom_images'
         cache=st.session_state.studio_images
         if original:
@@ -305,13 +330,13 @@ def analyze(rt,items,force=False):
 def source_panel(rt,sub,show_student=True,*,show_transcription=True):
     image=rt.image(sub.get('image_ref'))
     if image:
-        st.image(image,width=480)
+        st.image(image,width='stretch')
     elif sub.get('image_ref'):
         st.info('原图不在本会话中，请保留匿名原图。')
     st.caption((sub['student_id']+' / ' if show_student else '')+(sub['question_no'] or '原始题目'))
     message(sub['question'])
     for i,line in enumerate(sub['steps'],1):
-        st.text(f'{i:02d}  {line}')
+        message(f'**{i:02d}**　{line}')
     st.text('最终答案：'+(sub['answer'] or '未提供'))
     if show_transcription and sub.get('transcription') and show_student:
         with st.expander('完整转写与图像指纹'):

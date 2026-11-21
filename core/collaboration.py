@@ -33,6 +33,9 @@ def _write_meta(folder,meta):
         if Path(name).exists():Path(name).unlink()
 
 def create(name,root=None,*,creator_id='server-script',number_demo=False):
+    from core import backend_client
+    if root is None and backend_client.enabled():
+        return backend_client.request('POST','/classrooms',data={'name':name,'number_demo':number_demo})['code']
     name=e.text(name,80,'课堂名称');class_id=secrets.token_hex(16);token=secrets.token_urlsafe(32)
     folder=_folder(class_id,root)
     with CREATION_LIMITER.request(creator_id,1,CREATION_LIMITS):
@@ -60,6 +63,9 @@ def demo_code(class_id,number):
 
 
 def resolve(code,root=None):
+    from core import backend_client
+    if root is None and backend_client.enabled():
+        return backend_client.request('GET','/access',code=code) | {'code':code}
     if not isinstance(code,str) or len(code)>130 or code.count('.')!=1:raise ValueError(DENIED)
     class_id,token=code.strip().split('.')
     demo_student=bool(re.fullmatch(r'[0-9]{1,32}',token))
@@ -87,6 +93,9 @@ def resolve(code,root=None):
             'number_demo':number_demo}
 
 def invite(teacher_code,student_id,root=None):
+    from core import backend_client
+    if root is None and backend_client.enabled():
+        return backend_client.request('POST','/students/invite',code=teacher_code,data={'student_id':student_id})['code']
     with storage.LOCK:
         access=resolve(teacher_code,root)
         if access['role']!='teacher':raise ValueError('只有教师可以发放学习码。')
@@ -117,9 +126,13 @@ def student_view(w,sid):
          'questions':[deepcopy(q) for q in b['questions'] if q['id'] in {s.get('question_id') for s in own}]}
         for b in w['batches'] if any(rid in ids for rid in b['submission_ids'])]
     view['usage']=[];view['events']=[]
+    for key in c.LEARNING_COLLECTIONS:
+        view[key]=[deepcopy(row) for row in w.get(key,[]) if row.get('student_id')==sid]
     return view
 
 def load(code,root=None):
+    from core import backend_client
+    if root is None and backend_client.enabled():return backend_client.request('GET','/workspace',code=code)
     with storage.LOCK:
         access=resolve(code,root)
         w=c.load(_folder(access['class_id'],root)/'workspace.json')
@@ -149,6 +162,19 @@ def _merge(base,ours,theirs):
 def _student_changes(base,after,sid):
     for key in ('schema_version','id','batches','reviews','tasks','student_roster'):
         if after.get(key)!=base.get(key):raise ValueError('学生不能修改教师记录。')
+    if after.get('correction_reviews',[])!=base.get('correction_reviews',[]):
+        raise ValueError('学生不能自行写入教师订正结论。')
+    for key in ('correction_attempts','learning_events','review_units','review_events'):
+        old={r['id']:r for r in base.get(key,[])}
+        new={r['id']:r for r in after.get(key,[])}
+        if not old.keys()<=new.keys():raise ValueError('学习历史不能删除。')
+        for rid,row in new.items():
+            if row.get('student_id')!=sid:raise ValueError('只能保存自己的学习记录。')
+            if rid in old and row!=old[rid]:raise ValueError('已有学习事件不能改写。')
+            if key=='learning_events' and rid not in old and row.get('kind')!='attempt_submitted':
+                raise ValueError('学生不能写入教师评估事件。')
+    from core.learning_validation import validate_learning
+    validate_learning(after)
     for key in ('submissions','notebook','learning','attempts','study_sessions'):
         old={r['id']:r for r in base[key]};new={r['id']:r for r in after[key]}
         if not old.keys()<=new.keys():raise ValueError('原始记录不能删除。')
@@ -194,6 +220,11 @@ def adopt(target, source):
 
 def save(code,base,after,root=None):
     """Three-way merge independent edits; reject conflicts instead of losing data."""
+    from core import backend_client
+    if root is None and backend_client.enabled():
+        merged=backend_client.request('POST','/workspace/sync',code=code,data={'base':base,'after':after})
+        adopt(after,merged)
+        return merged['storage_version']
     with storage.LOCK:
         access=resolve(code,root);folder=_folder(access['class_id'],root)
         if access['role']=='student':_student_changes(base,after,access['student_id'])

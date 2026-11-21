@@ -5,6 +5,7 @@ __pycache__/
 .local_data/
 
 .venv/
+*.egg-info/
 artifacts/
 *.log
 

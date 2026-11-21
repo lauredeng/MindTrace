@@ -25,6 +25,13 @@ def results(rt,batch,case_renderer,view='grading'):
         '点击题号查看学生作答和批改依据。',
         '作业批改 / 批改结果' if view=='grading' else batch['name'],summary['status'])
     execution=summary['execution']
+    from core.identities import assignment_counts
+    roster=assignment_counts(rt.w,batch)
+    if roster['expected']:
+        st.caption(f"本次应交 {roster['expected']} 人 · 已收到 {roster['received']} 人 · 未交 {len(roster['missing'])} 人。未交不计为答错。")
+        if roster['missing']:
+            with st.popover('查看未交学号'):
+                st.write('、'.join(roster['missing']))
     progress_text=f"已处理 {execution['complete']} / {execution['total']} 份作答。"
     if execution['status']=='failed':
         retry='点击「重试未完成的批改」。' if view=='grading' else '回到「作业批改」重试。'
@@ -36,6 +43,8 @@ def results(rt,batch,case_renderer,view='grading'):
         st.warning(progress_text+' '+reason+' 进度已保存。')
     if execution['needs_transcription']:
         st.info(f'{execution["needs_transcription"]} 份作答的识别文字不完整。可在作答详情的「原卷与校对」中处理。')
+    if execution['needs_review']:
+        st.info(f'{execution["needs_review"]} 份作答已完成 AI 核验，仍需教师复核。请查看异常作答中的批改依据；再次执行整批批改不会重复请求这些结果。')
     cards=st.columns(4,gap='large')
     with cards[0]:metric('提交学生',summary['submitted_students'],'同一学生提交多题仅计一人',accent=True,icon_name='people')
     with cards[1]:metric('平均正确率',f"{summary['correctness']:.1%}" if summary['correctness'] is not None else '—',
@@ -105,7 +114,7 @@ def results(rt,batch,case_renderer,view='grading'):
 
 
 def batch_settings(rt,batch):
-    section=st.segmented_control('批次设置项目',['题号与题型','班级总分'],default='题号与题型',
+    section=st.segmented_control('批次设置项目',['题号与题型','题目对应','班级总分'],default='题号与题型',
                                  required=True,key='batch_settings_'+batch['id'])
     if section=='题号与题型':
         st.caption('修改后会更新题目分组，原题与批改记录会保留。')
@@ -117,6 +126,20 @@ def batch_settings(rt,batch):
         if st.button('保存题型与小问编号',key='save_kinds_'+batch['id']):
             try:v.update_types(rt.w,batch['id'],edited.fillna('').to_dict('records'));rt.persist();st.rerun()
             except ValueError as exc:st.error(str(exc))
+    elif section=='题目对应':
+        from core import identities
+        records=[s for s in rt.w['submissions'] if s['id'] in batch['submission_ids']]
+        identities.attach(batch,records)
+        st.caption('识别差异导致同一题分成多个题目时，可在核对原卷后建立对应关系。相同题号不会自动合并不同题干。')
+        choices={s['assignment_question_id']:s for s in records}
+        target=st.selectbox('对应到哪一道题',list(choices),format_func=lambda key:(choices[key].get('question_no') or '未编号')+' · '+choices[key]['question'][:65])
+        selected=st.multiselect('需要调整对应关系的作答',[s['id'] for s in records if s['assignment_question_id']!=target],
+            format_func=lambda key:next(s['student_id']+' · '+(s.get('question_no') or '未编号')+' · '+s['question'][:45] for s in records if s['id']==key))
+        if st.button('确认对应关系',disabled=not selected):
+            try:
+                identities.relink(rt.w,batch['id'],selected,target)
+                rt.persist(strict=True);st.rerun()
+            except (ValueError,RuntimeError) as exc:st.error(str(exc))
     else:
         st.caption('录入所有已交作业学生的总分后，页面会显示班级平均分。')
         students=sorted({s['student_id'] for s in rt.w['submissions'] if s['id'] in batch['submission_ids'] and s.get('submission_status')!='not_submitted'})

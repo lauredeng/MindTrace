@@ -3,6 +3,7 @@ import os
 
 
 def secret_value(name):
+    if os.getenv('MINDTRACE_HEADLESS')=='1':return None
     try:
         import streamlit as st
         return st.secrets.get(name)

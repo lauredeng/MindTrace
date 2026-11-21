@@ -27,7 +27,14 @@ def sync_panel():
     if not access:return
     try:
         changed=collab.version(access['code'])!=st.session_state.get('studio_workspace',{}).get('storage_version')
-        if changed:st.info('课堂有新记录，点击刷新查看。')
+        if changed:
+            local=st.session_state.get('studio_workspace',{})
+            base=st.session_state.get('collab_snapshot',{})
+            if local==base:
+                w=collab.load(access['code']);st.session_state['studio_workspace']=w
+                st.session_state['collab_snapshot']=deepcopy(w)
+                st.rerun(scope='app')
+            st.info('课堂有新记录。当前修改保存后将自动同步。')
         if st.button('刷新课堂数据',key='refresh_collab'):
             w=collab.load(access['code']);st.session_state['studio_workspace']=w
             st.session_state['collab_snapshot']=deepcopy(w)

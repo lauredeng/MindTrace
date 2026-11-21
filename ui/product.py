@@ -172,7 +172,7 @@ def reference_panel(rt,batch):
 
 def show_wait(place,seconds,action):
     if seconds:
-        place.info(f'AI 服务短暂限流或繁忙。约 {seconds} 秒后自动继续{action}，已完成内容会保留。')
+        place.info(f'服务暂时繁忙，{seconds} 秒后自动重试{action}。无需重复点击。')
     else:
         place.empty()
 
@@ -213,8 +213,18 @@ def teacher(rt):
     if not batch:return
     reference_panel(rt,batch)
     execution=p.batch_execution(rt.w,batch['id'])
-    can_grade=rt.ready() or any(entry.get('confirmed') for entry in batch.get('answer_keys',{}).values())
+    from ui.background import enabled,grading_ready
+    can_grade=rt.ready() or (enabled(rt) and grading_ready(rt)) or any(entry.get('confirmed') for entry in batch.get('answer_keys',{}).values())
     def execute_batch():
+        from ui.background import enabled
+        if enabled(rt):
+            from ui.background import enqueue
+            try:
+                rt.persist(strict=True)
+                enqueue(rt,batch['id'])
+            except (ValueError,RuntimeError,OSError) as exc:
+                st.error(str(exc));return
+            st.rerun()
         progress=st.progress(0,text='准备批改，已成功结果将复用…')
         waiting=st.empty()
         def provider(*args,**kwargs):
@@ -223,24 +233,30 @@ def teacher(rt):
             return rt.call(*args,**kwargs)
         call=auto_resume(provider,lambda _,seconds:show_wait(waiting,seconds,'批改'))
         def update(stage,i,n):
-            rt.persist()
-            progress.progress((0 if stage=='quick' else .5)+.5*i/n,text=('快速批改' if stage=='quick' else '疑难作答核验')+f' {i}/{n}')
+            state=p.batch_execution(rt.w,batch['id'])
+            label='初步批改' if stage=='quick' else '疑难作答核验'
+            progress.progress(state['complete']/max(1,state['total']),
+                              text=f"{label} · 已处理 {state['complete']}/{state['total']} · 待教师复核 {state['needs_review']}")
         try:
-            p.run_batch(rt.w,batch['id'],call,update,_prepare=rt.prepare_workspace,_persist=rt.persist)
-        except RuntimeError:
-            st.warning('暂时无法继续批改。如果另一窗口正在处理，请稍后刷新查看进度。')
+            p.run_batch(rt.w,batch['id'],call,update,_prepare=rt.prepare_workspace,
+                        _persist=lambda:rt.persist(strict=True))
+        except RuntimeError as exc:
+            st.warning(str(exc))
             return
         st.rerun()
     if execution['status'] in ('failed','partial','paused') or (batch.get('status')=='running' and execution['remaining']):
         action='继续未完成的批改' if execution['status']=='paused' or batch.get('status')=='running' else '重试未完成的批改'
         if st.button(action,type='primary',disabled=not can_grade or not execution['retryable_remaining'],
                      key='retry_batch_'+batch['id']):execute_batch()
-        st.caption('继续批改时会保留已有判定。')
+        if execution['retryable_remaining']:
+            st.caption('仅重试未完成的处理步骤；已完成的判定与待教师复核结果会保留。')
     elif execution['status']=='ready':
         if st.button('开始批改',type='primary',disabled=not can_grade,key='start_batch_'+batch['id']):
             execute_batch()
-        if not rt.ready():st.warning('AI 服务尚未启用，配置服务后即可开始批改。')
+        if not can_grade:st.warning('AI 服务尚未配置，配置服务或确认参考答案后即可开始批改。')
     from ui.results import results
+    from ui.background import enabled,task_panel
+    if enabled(rt):task_panel(rt,batch['id'])
     results(rt,batch,selected_case,view='grading')
 
 
@@ -248,7 +264,7 @@ def question_table(rows):
     st.dataframe([{'题号':g['label'],'题目':g['question'][:100],'已判':g['valid'],
         '正确':g['correct'],'错误':g['errors'],'留白（已计错）':g['not_submitted'],
         '待批改':g['waiting'],'批改后未判定':g['pending']-g['waiting'],
-        '无法识别':g['unreadable']} for g in rows],hide_index=True,width='stretch')
+        '无法识别':g['unreadable'],'未交':g.get('missing',0)} for g in rows],hide_index=True,width='stretch')
 
 def transcription_editor(rt,sub,state,key):
     if not sub.get('batch_id') or not sub.get('image_ref'):
@@ -276,7 +292,7 @@ def transcription_editor(rt,sub,state,key):
         try:
             with st.spinner('正在重新批改这一题…'):
                 p.regrade_transcription(rt.w,sub['batch_id'],sub['id'],sub['fingerprint'],steps,answer,rt.call,
-                                        question=question,prepare=rt.prepare_workspace,persist=rt.persist)
+                                        question=question,prepare=rt.prepare_workspace,persist=lambda:rt.persist(strict=True))
             st.rerun()
         except (OSError,RuntimeError,ValueError) as exc:
             st.warning(str(exc))
@@ -307,103 +323,119 @@ def selected_case(rt,subs,key='v12_case'):
     filenames={m['student_id']:m['pages'][0]['filename'] for b in rt.w['batches'] for m in b.get('materials',[])
                if m['identity_status']=='file_group'}
     labels={s['id']:filenames.get(s['student_id'],s['student_id'])+' / '+(s['question_no'] or s['topic']) for s in selected}
-    sid=st.selectbox('查看学生原始作答',ids,key=key,format_func=labels.get)
+    with st.container(key='case_navigation_'+key):
+        selector,prev_col,next_col=st.columns([6,1,1])
+    current_index=ids.index(st.session_state[key])
+    with selector:
+        sid=st.selectbox('选择学生作答',ids,key=key,format_func=labels.get)
+    with prev_col:
+        st.button('← 上一份',key=key+'_previous',disabled=current_index==0,
+                  on_click=lambda:st.session_state.update({key:ids[current_index-1]}),width='stretch')
+    with next_col:
+        st.button('下一份 →',key=key+'_next',disabled=current_index==len(ids)-1,
+                  on_click=lambda:st.session_state.update({key:ids[current_index+1]}),width='stretch')
     sub=next(s for s in selected if s['id']==sid)
     state=p.effective(rt.w,sub)
-    review_tab,original_tab,feedback_tab=st.tabs(['作答与批改','原卷与校对','学生反馈'])
-    with review_tab:
-        a,b=st.columns([1,1.15],gap='large')
-    with a:
-        st.subheader('原始题目与作答')
-        source_panel(rt,sub,show_student=sub['student_id'] not in filenames,show_transcription=False)
-    with b:
-        st.subheader('批改依据')
-        record_status=record_states[sub['id']]
-        label={'unreadable':'识别不完整','not_submitted':'留白 · 已计错','pending':'未得到判定',
-               'correct':'正确','incorrect':'错误'}[record_status]
-        if v.waiting_for_grade(sub,record_status):label='待批改'
-        st.markdown(badge(label)+(badge('教师判定') if state['confirmed'] else ''),unsafe_allow_html=True)
-        st.write(state['basis'])
-        failed=False
-        for key_name in ('quick_checks','analyses'):
-            records=p.current_records(sub,key_name)
-            if records and records[-1]['status']=='failed':
-                failed=True
-                st.error('最近一次未完成：'+records[-1]['error'])
-        if p.unreadable(sub):
-            st.warning('识别文字不完整。切换到「原卷与校对」，对照原卷补全题干或作答。')
-        elif failed and sub.get('batch_id') and st.button('重试本题批改',key=key+'_retry_'+sub['id'],disabled=not rt.ready()):
-            try:
-                with st.spinner('正在重试这一题的未完成步骤…'):
-                    p.run_batch(rt.w,sub['batch_id'],rt.call,lambda *_:rt.persist(),
-                                _prepare=rt.prepare_workspace,_persist=rt.persist,submission_id=sub['id'])
-                st.rerun()
-            except (OSError,RuntimeError,ValueError) as exc:
-                st.warning(str(exc))
-        quick=p.latest(sub,'quick_checks')
-        if quick:
-            label='识别出的学生答案' if quick.get('evidence_id')=='ANSWER' else (
-                '原题依据' if quick.get('evidence_id')=='QUESTION' or quick.get('blank') else '判定引用的原始作答')
-            st.text(label+'：'+quick['evidence_quote'])
-        if not state['confirmed'] and p.latest(sub,'quick_checks') and state['verdict']!='uncertain' and v.record_state(rt.w,sub) not in ('unreadable','not_submitted'):
-            if st.button('确认这份批改',key=key+'_confirm_'+sub['id']):
-                try:v.confirm_short(rt.w,sub['id']);rt.persist();st.rerun()
-                except ValueError as exc:st.error(str(exc))
-        if not p.is_blank(sub):
-            with st.popover('教师改判'):
-                previous=c.latest_review(rt.w,sub['id'])
-                with st.form(key+'_override_'+sub['id']+'_'+sub['fingerprint']):
-                    verdict=st.selectbox('批改结论',['correct','incorrect'],
-                                         index=['correct','incorrect'].index(state['verdict']) if state['verdict']!='uncertain' else None,
-                                         format_func=lambda value:LABEL[value])
-                    note=st.text_area('教师备注 / 修改依据',value=(previous or {}).get('note',''),max_chars=2000)
-                    submit=st.form_submit_button('保存复核并更新统计')
-                if submit:
-                    try:
-                        v.override_grade(rt.w,sub['id'],verdict,note);rt.persist();st.rerun()
-                    except ValueError as exc:
-                        st.error(str(exc))
+    st.markdown('<div class="review-case-header"><div><h3>第 '+safe(sub.get('question_no') or '未编号')+
+                ' 题 · '+safe(sub['student_id'])+'</h3><p>对照原始作答，核查判定依据。</p></div>'+
+                badge('教师已复核' if state['confirmed'] else '待教师复核')+'</div>',unsafe_allow_html=True)
+    with st.container(key='evidence_workspace'):
+        review_tab,original_tab,feedback_tab=st.tabs(['批改复核','原卷与校对','学生反馈'])
+        with review_tab:
+            a,b=st.columns([1.15,1],gap='large')
+        with a,st.container(border=True):
+            st.markdown('<div class="review-section-label">原题与学生作答</div>',unsafe_allow_html=True)
+            source_panel(rt,sub,show_student=sub['student_id'] not in filenames,show_transcription=False)
+        with b,st.container(border=True):
+            st.markdown('<div class="review-section-label">判定与原文依据</div>',unsafe_allow_html=True)
+            record_status=record_states[sub['id']]
+            label={'unreadable':'识别不完整','not_submitted':'留白 · 已计错','pending':'未得到判定',
+                   'correct':'正确','incorrect':'错误'}[record_status]
+            if v.waiting_for_grade(sub,record_status):label='待批改'
+            st.markdown(badge(label)+(badge('教师判定') if state['confirmed'] else ''),unsafe_allow_html=True)
+            st.write(state['basis'])
+            failed=False
+            for key_name in ('quick_checks','analyses'):
+                records=p.current_records(sub,key_name)
+                if records and records[-1]['status']=='failed':
+                    failed=True
+                    st.error('最近一次未完成：'+records[-1]['error'])
+            if p.unreadable(sub):
+                st.warning('识别文字不完整。切换到「原卷与校对」，对照原卷补全题干或作答。')
+            elif failed and sub.get('batch_id') and st.button('重试本题批改',key=key+'_retry_'+sub['id'],disabled=not rt.ready()):
+                try:
+                    with st.spinner('正在重试这一题的未完成步骤…'):
+                        p.run_batch(rt.w,sub['batch_id'],rt.call,
+                                    _prepare=rt.prepare_workspace,_persist=lambda:rt.persist(strict=True),submission_id=sub['id'])
+                    st.rerun()
+                except (OSError,RuntimeError,ValueError) as exc:
+                    st.warning(str(exc))
+            quick=p.latest(sub,'quick_checks')
+            if quick:
+                label='识别出的学生答案' if quick.get('evidence_id')=='ANSWER' else (
+                    '原题依据' if quick.get('evidence_id')=='QUESTION' or quick.get('blank') else '判定引用的原始作答')
+                st.text(label+'：'+quick['evidence_quote'])
+            if not state['confirmed'] and p.latest(sub,'quick_checks') and state['verdict']!='uncertain' and v.record_state(rt.w,sub) not in ('unreadable','not_submitted'):
+                if st.button('确认这份批改',key=key+'_confirm_'+sub['id']):
+                    try:v.confirm_short(rt.w,sub['id']);rt.persist();st.rerun()
+                    except ValueError as exc:st.error(str(exc))
+            if not p.is_blank(sub):
+                with st.popover('教师改判'):
+                    previous=c.latest_review(rt.w,sub['id'])
+                    with st.form(key+'_override_'+sub['id']+'_'+sub['fingerprint']):
+                        verdict=st.selectbox('批改结论',['correct','incorrect'],
+                                             index=['correct','incorrect'].index(state['verdict']) if state['verdict']!='uncertain' else None,
+                                             format_func=lambda value:LABEL[value])
+                        note=st.text_area('教师备注 / 修改依据',value=(previous or {}).get('note',''),max_chars=2000)
+                        submit=st.form_submit_button('保存复核并更新统计')
+                    if submit:
+                        try:
+                            v.override_grade(rt.w,sub['id'],verdict,note);rt.persist();st.rerun()
+                        except ValueError as exc:
+                            st.error(str(exc))
 
-    with original_tab:
-        source,editor=st.columns([1,1],gap='large')
-        with source:
-            upload_provenance(rt,sub,key)
-        with editor:
-            if sub.get('batch_id') and sub.get('image_ref'):
-                transcription_editor(rt,sub,state,key)
-            else:
-                st.caption('这份作答没有可校对的上传图片。')
+        with original_tab:
+            source,editor=st.columns([1,1],gap='large')
+            with source:
+                upload_provenance(rt,sub,key)
+            with editor:
+                if sub.get('batch_id') and sub.get('image_ref'):
+                    transcription_editor(rt,sub,state,key)
+                else:
+                    st.caption('这份作答没有可校对的上传图片。')
 
-    with feedback_tab:
-        entries=[n for n in rt.w['notebook'] if n['student_id']==sub['student_id'] and p.item_key(sub)==n.get('question_id') and not n.get('deleted')]
-        sessions=[t for t in rt.w['study_sessions'] if t['submission_id']==sub['id'] and t['student_id']==sub['student_id']]
-        if entries:
-            item=entries[0]
-            st.write('学生当前错因：'+item['primary_category']+' · '+('本人已确认' if item['category_confirmed'] else '待本人确认'))
-            if item['notes']:st.write('学生备注：'+item['notes'])
-        turns=[t for session in sessions for t in session['turns']]
-        st.write('本题辅导互动：'+str(len(turns))+' 次')
-        if turns:
-            latest=turns[-1]
-            if latest.get('reply'):st.write('最近追问：'+latest['reply'])
-            st.caption('最近学习问题：'+latest.get('purpose',''))
-        if not entries and not turns:st.caption('学生尚未收录或留下本题学习反馈。')
-        from core import agent as tutoring_agent
-        runs=[r for record in sessions for r in record.get('agent_runs',[])]
-        if runs:
-            latest_run=runs[-1]
-            st.write('深度辅导状态：'+tutoring_agent.STATUSES.get(latest_run['status'],'已记录'))
-            review=c.latest_review(rt.w,sub['id'])
-            pending=[r for r in runs if r.get('needs_teacher_review') and (not review or review['created_at']<r['requested_at'])]
-            if pending:st.warning('本题已请求教师核对，请结合原始证据复核。')
-            with st.popover('查看辅导过程'):
-                for trace in latest_run['trace']:
-                    if trace.get('policy')=='allowed':
-                        st.write(tutoring_agent.ACTIONS[trace['action']]+'：'+trace['rationale'])
-                        st.caption('证据引用：'+'、'.join(trace['evidence_ids']))
-                    elif trace.get('observation'):st.caption('未执行动作：'+trace['observation'].get('reason','不满足条件'))
-                verified=next((r['practice'] for r in reversed(runs) if r.get('practice',{}).get('attempts')),None)
-                if verified:st.write('新题验证：'+e.learning_state(verified['attempts']))
+        with feedback_tab:
+            from ui.learning_hub import teacher_corrections
+            teacher_corrections(rt,sub,prefix=key+'_corrections')
+            entries=[n for n in rt.w['notebook'] if n['student_id']==sub['student_id'] and p.item_key(sub)==n.get('question_id') and not n.get('deleted')]
+            sessions=[t for t in rt.w['study_sessions'] if t['submission_id']==sub['id'] and t['student_id']==sub['student_id']]
+            if entries:
+                item=entries[0]
+                st.write('学生当前错因：'+item['primary_category']+' · '+('本人已确认' if item['category_confirmed'] else '待本人确认'))
+                if item['notes']:st.write('学生备注：'+item['notes'])
+            turns=[t for session in sessions for t in session['turns']]
+            st.write('本题辅导互动：'+str(len(turns))+' 次')
+            if turns:
+                latest=turns[-1]
+                if latest.get('reply'):st.write('最近追问：'+latest['reply'])
+                st.caption('最近学习问题：'+latest.get('purpose',''))
+            if not entries and not turns:st.caption('学生尚未收录或留下本题学习反馈。')
+            from core import agent as tutoring_agent
+            runs=[r for record in sessions for r in record.get('agent_runs',[])]
+            if runs:
+                latest_run=runs[-1]
+                st.write('深度辅导状态：'+tutoring_agent.STATUSES.get(latest_run['status'],'已记录'))
+                review=c.latest_review(rt.w,sub['id'])
+                pending=[r for r in runs if r.get('needs_teacher_review') and (not review or review['created_at']<r['requested_at'])]
+                if pending:st.warning('本题已请求教师核对，请结合原始证据复核。')
+                with st.popover('查看辅导过程'):
+                    for trace in latest_run['trace']:
+                        if trace.get('policy')=='allowed':
+                            st.write(tutoring_agent.ACTIONS[trace['action']]+'：'+trace['rationale'])
+                            st.caption('证据引用：'+'、'.join(trace['evidence_ids']))
+                        elif trace.get('observation'):st.caption('未执行动作：'+trace['observation'].get('reason','不满足条件'))
+                    verified=next((r['practice'] for r in reversed(runs) if r.get('practice',{}).get('attempts')),None)
+                    if verified:st.write('新题验证：'+e.learning_state(verified['attempts']))
 
 def insights(rt):
     from ui.design import page_header
@@ -422,7 +454,7 @@ def upload_provenance(rt,sub,key):
     material=next((m for m in (batch or {}).get('materials',[]) if m['student_id']==sub['student_id']),None)
     if not material:
         image=rt.image(sub.get('image_ref')) if sub.get('image_ref') else None
-        if image:st.image(image,width=450)
+        if image:st.image(image,width='stretch')
         else:st.caption('这份作答没有可查看的原卷。')
         if sub.get('transcription'):st.text(sub['transcription'])
         return
@@ -434,7 +466,7 @@ def upload_provenance(rt,sub,key):
     page=pages[selected-1]
     st.caption(page['filename']+' · 第 '+str(selected)+' 页')
     image=rt.image(page['original_image'])
-    if image:st.image(image,width=450)
+    if image:st.image(image,width='stretch')
     if page['transcription']:st.text(page['transcription'])
     if page.get('recognized_records'):
         st.caption('该页初次识别结果')
@@ -539,7 +571,8 @@ def student_composer(rt,sid):
                 sub=rt.add({'student_id':sid,'question':question},'self_study',allow_unanswered=True)
                 st.session_state['v12_sub_pending']=sub['id']
                 st.session_state[pending_question]={'text':question,'ids':[sub['id']]}
-                if rt.ready():
+                from core import tutor_client
+                if rt.ready() and not tutor_client.configured():
                     try:
                         with st.spinner('正在回答…'):
                             p.study_turn(rt.w,sub,'reply',question,rt.call)
@@ -583,6 +616,7 @@ def student(rt):
     from ui.design import page_header
     page_header('AI解题与辅导','上传题目或打开老师批改过的作业，选择提示、分步讲解或完整解答。','我的学习 / 数学答疑')
     sid=student_id(rt)
+    from core import tutor_client
     upload,existing=st.tabs(['开始提问','我的作业'])
     with upload:
         pending_question=student_composer(rt,sid)
@@ -599,6 +633,9 @@ def student(rt):
                            '判断':LABEL[p.effective(rt.w,s)['verdict']]} for s in reversed(own)],
                          hide_index=True,width='stretch')
     if not own:
+        if tutor_client.configured():
+            from ui.tutoring import handoff
+            handoff(rt,key='official_student_home')
         empty('从一道题开始','自主拍题或输入题目后，可以直接请求讲解。');return
     ids=[s['id'] for s in own];focus=st.session_state.pop('v12_sub_pending',None)
     if focus in ids:st.session_state['v12_sub']=focus
@@ -606,6 +643,11 @@ def student(rt):
     labels={s['id']:source_name(s)+' · '+(s['question_no'] or s['topic'])+' · '+s['question'][:60] for s in own}
     selected=st.selectbox('当前学习题目',ids,key='v12_sub',format_func=labels.get)
     sub=next(s for s in own if s['id']==selected)
+    if tutor_client.configured():
+        source_panel(rt,e.student_material(rt.w,sub),show_student=False)
+        from ui.tutoring import handoff
+        handoff(rt,sub,key='official_selected_'+sub['id'])
+        return
     source_batch=next((b for b in rt.w['batches'] if b['id']==sub.get('batch_id')),None)
     if source_batch:st.caption('来自教师作业：'+source_batch['name']+' · 第 '+(sub.get('question_no') or '未编号')+' 题，无需重新上传。')
     left,right=st.columns([1,1.3],gap='large')
@@ -685,6 +727,8 @@ def student(rt):
                 except (ValueError,RuntimeError) as exc:rt.persist();st.error(str(exc))
     st.divider()
     no_work=not bool(sub['steps'] or sub['answer'])
+    from ui.learning_hub import correction_form
+    correction_form(rt,sub,prefix='tutor_correction')
     cause=st.selectbox('收录时的主要错因',[p.UNKNOWN]+p.CATEGORIES,index=(p.CATEGORIES.index('暂无解题思路')+1) if no_work else 0)
     confirm=st.checkbox('我确认本题的错因分类',value=False)
     if st.button('加入 / 更新我的错题本',type='primary'):
@@ -713,6 +757,10 @@ def open_book_entry(entry_id):
     go('学生学习空间','我的错题本')
 
 def notebook_cause_text(item, sub=None):
+    if item.get('evidence_status')=='awaiting_review':
+        return '当前判定待核对 · 已保留个人笔记'
+    if not item.get('active_error',True):
+        return '当前已判正确 · 已保留学习记录'
     if item['primary_category']!=p.UNKNOWN:
         return '主要错因：'+item['primary_category']
     diagnostic=p.current_deep(sub) if sub else None
@@ -724,6 +772,10 @@ def notebook_detail(rt,sid,item):
               and p.item_key(s)==item.get('question_id',p.question_key(item['question']))),None)
     with surface():
         st.markdown('<div class="section-heading"><h3>错题详情</h3>'+badge(v.kind(item))+'</div>',unsafe_allow_html=True)
+        if sub:
+            from core.learning_records import correction_progress
+            progress=correction_progress(rt.w,sub['id'],sid)
+            if progress:st.markdown(badge(progress['label'],'purple'),unsafe_allow_html=True)
         source_batch=next((b for b in rt.w['batches'] if b['id']==(sub or {}).get('batch_id')),None)
         if source_batch:st.caption('来自教师作业：'+source_batch['name']+' · 第 '+(sub.get('question_no') or '未编号')+' 题')
         original,solution,knowledge=st.tabs(['原题与错误','正确解法','相关公式与方法'])
@@ -777,8 +829,25 @@ def notebook_detail(rt,sid,item):
                 rt.persist();st.rerun()
         st.divider()
         st.markdown('**还有哪一步不明白？**')
-        if sub and st.button('继续向 AI 追问',type='primary',key='continue_book_'+item['id']):
+        from core import tutor_client
+        if sub and tutor_client.configured():
+            from ui.tutoring import handoff
+            handoff(rt,sub,key='official_notebook_'+item['id'])
+        elif sub and st.button('继续向 AI 追问',type='primary',key='continue_book_'+item['id']):
             st.session_state['v12_sub_pending']=sub['id'];go('学生学习空间','AI 解题与辅导');st.rerun()
+        if sub:
+            correction,scheduled=st.columns(2)
+            if correction.button('提交订正 / 查看反馈',key='correct_book_'+item['id'],width='stretch'):
+                st.session_state['learning_hub_sub']=sub['id']
+                go('学生学习空间','订正与复习');st.rerun()
+            if scheduled.button('加入复习计划',key='schedule_book_'+item['id'],width='stretch'):
+                from core.review_scheduler import add_unit
+                from ui.learning_hub import command
+                try:
+                    command(rt,'/learning/units',dict(submission_id=sub['id'],objective='独立重做'),
+                            lambda:add_unit(rt.w,sub['id'],sid))
+                    st.success('已加入复习计划，可在「订正与复习」查看。')
+                except (ValueError,RuntimeError) as exc:st.warning(str(exc))
         st.caption('收录于 '+item['created_at'][:10]+' · '+('自主学习' if item['origin']=='self_study' else '作业批改'))
     with st.expander('修改错因与题目记录'):
         with st.form('book_edit_'+item['id']):
@@ -892,9 +961,13 @@ def causes(rt):
 
 def landing(rt):
     st.markdown(
-        '<div class="landing-intro landing-classic"><span class="eyebrow">'+BRAND_TITLE+'</span>'
+        '<section class="landing-intro landing-classic"><div class="landing-copy"><span class="eyebrow">'+BRAND_TITLE+'</span>'
         '<h1>学然后知不足，<br>教然后知困。</h1><cite>《礼记·学记》</cite>'
-        '<p>循理是高中数学批改与辅导平台。教师批量批改、查看班级易错题；学生根据原作答追问和练习。</p></div>',
+        '<p>面向高中数学的作业批改与学习辅导。<br>从班级共性问题，回到每一份作答与每一步理解。</p></div>'
+        '<div class="landing-overview" aria-label="产品使用流程"><span class="overview-kicker">一份作答，连接教与学</span>'
+        '<div class="journey-step"><span>01</span><div><b>批量批改</b><p>同一次作业，集中查看班级问题。</p></div></div>'
+        '<div class="journey-step"><span>02</span><div><b>原卷复核</b><p>每一项判定，都有原始作答可查。</p></div></div>'
+        '<div class="journey-step"><span>03</span><div><b>错题辅导</b><p>结合自己的解题过程，继续追问。</p></div></div></div></section>',
         unsafe_allow_html=True,
     )
     st.session_state.setdefault('home_preselection','teacher')
@@ -907,7 +980,7 @@ def landing(rt):
         with col,surface(key='home_'+value):
             st.button(kicker+'\n\n**'+heading+'**\n\n'+description,key='home_select_'+value,
                 type='primary' if selected else 'secondary',width='stretch',
-                on_click=lambda choice=value:st.session_state.update(home_preselection=choice))
+                on_click=go,args=(role,destination))
             st.button(enter,key='home_enter_'+value,type='primary' if selected else 'secondary',width='stretch',on_click=go,args=(role,destination))
 
 def sync_notebook_sources(rt,sid=None):
@@ -916,6 +989,7 @@ def sync_notebook_sources(rt,sid=None):
     records=[sub for sub in rt.w['submissions'] if sid is None or sub['student_id']==sid]
     ids={sub['id'] for sub in records}
     sources=[(sub['id'],sub.get('question_type'),sub.get('question_no'),sub.get('parent_question_no'),sub.get('subquestion_no'),sub.get('image_ref'),
+              sub.get('reference_revision'),
               [(key,(sub.get(key) or [{}])[-1].get('id'),(sub.get(key) or [{}])[-1].get('status'))
                for key in ('quick_checks','analyses','solutions')]) for sub in records]
     token=p.digest([rt.w['id'],sid,sources,[r['id'] for r in rt.w['reviews'] if r['submission_id'] in ids]])
@@ -929,7 +1003,7 @@ def sync_notebook_sources(rt,sid=None):
 
 def render(page,root,shared,key=None):
     rt=Runtime(root,shared,key);p.ensure(rt.w);st.session_state['_surface_index']=0
-    if page in ('AI解题与辅导','我的错题本','错因分析'):
+    if page in ('AI解题与辅导','我的错题本','错因分析','订正与复习','学习画像'):
         student_identity_panel(rt)
         sync_notebook_sources(rt,student_id(rt))
     else:
@@ -938,7 +1012,11 @@ def render(page,root,shared,key=None):
         st.caption('验收构造数据：批改与确认由测试脚本生成，仅用于核对界面和统计，不代表真实课堂或模型评测。')
     if any(s['source'] in ('constructed_examples','live_constructed_fixture','v12_constructed_live') for s in rt.w['submissions']):
         st.caption('当前包含构造匿名材料；真实接口返回不代表真实学生学习效果。')
-    {'产品首页':landing,'作业批改':teacher,'班级错误分析':insights,'历史记录':history,
-     'AI解题与辅导':student,'我的错题本':notebook,'错因分析':causes}[page](rt)
+    if page in ('订正与复习','学习画像'):
+        from ui.learning_hub import student_workspace
+        student_workspace(rt,view='profile' if page=='学习画像' else 'review')
+    else:
+        {'产品首页':landing,'作业批改':teacher,'班级错误分析':insights,'历史记录':history,
+         'AI解题与辅导':student,'我的错题本':notebook,'错因分析':causes}[page](rt)
     st.markdown('<div class="footer"><span>'+BRAND_TITLE+'</span></div>',unsafe_allow_html=True)
 
